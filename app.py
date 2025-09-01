@@ -101,7 +101,7 @@ def init_db():
             )
         ''')
         
-        # Новая таблица: администраторы каналов
+        # Таблица администраторов каналов
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS channel_admins (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,7 +146,7 @@ def init_db():
             group_id = cursor.lastrowid
             
             # Добавляем всех пользователей в группу
-            for user_id in [1, 2, 3]:
+            for user_id in [1, 2, 3, 4, 5]:
                 cursor.execute(
                     "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)",
                     (group_id, user_id)
@@ -167,23 +167,27 @@ def init_db():
                 channel_id = cursor.lastrowid
                 
                 # Добавляем подписчиков в каналы
-                subscribers = [1, 2, 3, 4] if channel_id == 1 else [1, 2, 3] if channel_id == 2 else [1, 3, 5]
+                subscribers = [1, 2, 3, 4, 5]  # Все пользователи подписаны на все каналы
                 for user_id in subscribers:
-                    cursor.execute(
-                        "INSERT INTO channel_subscribers (channel_id, user_id) VALUES (?, ?)",
-                        (channel_id, user_id)
-                    )
+                    try:
+                        cursor.execute(
+                            "INSERT INTO channel_subscribers (channel_id, user_id) VALUES (?, ?)",
+                            (channel_id, user_id)
+                        )
+                    except sqlite3.IntegrityError:
+                        pass  # Уже подписан
                 
                 # Добавляем администраторов для тестовых каналов
                 if channel_id == 1:  # Для первого канала добавляем админов
-                    cursor.execute(
-                        "INSERT INTO channel_admins (channel_id, user_id, added_by) VALUES (?, ?, ?)",
-                        (channel_id, 2, 1)  # maria как админ
-                    )
-                    cursor.execute(
-                        "INSERT INTO channel_admins (channel_id, user_id, added_by) VALUES (?, ?, ?)",
-                        (channel_id, 3, 1)  # ivan как админ
-                    )
+                    admin_users = [2, 3]  # maria и ivan как админы
+                    for user_id in admin_users:
+                        try:
+                            cursor.execute(
+                                "INSERT INTO channel_admins (channel_id, user_id, added_by) VALUES (?, ?, ?)",
+                                (channel_id, user_id, 1)
+                            )
+                        except sqlite3.IntegrityError:
+                            pass
         
         db.commit()
         db.close()
@@ -201,21 +205,39 @@ def is_channel_admin(channel_id, user_id):
     db = get_db()
     cursor = db.cursor()
     
+    # Проверяем, является ли пользователь создателем канала
+    cursor.execute(
+        "SELECT creator_id FROM channels WHERE id = ?",
+        (channel_id,)
+    )
+    channel = cursor.fetchone()
+    if channel and channel['creator_id'] == user_id:
+        db.close()
+        return True
+    
+    # Проверяем, является ли пользователь администратором
     cursor.execute(
         "SELECT 1 FROM channel_admins WHERE channel_id = ? AND user_id = ?",
         (channel_id, user_id)
     )
     is_admin = cursor.fetchone() is not None
     
+    db.close()
+    return is_admin
+
+def is_group_member(group_id, user_id):
+    """Проверяет, является ли пользователь участником группы"""
+    db = get_db()
+    cursor = db.cursor()
+    
     cursor.execute(
-        "SELECT creator_id FROM channels WHERE id = ?",
-        (channel_id,)
+        "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?",
+        (group_id, user_id)
     )
-    channel = cursor.fetchone()
-    is_creator = channel and channel['creator_id'] == user_id
+    is_member = cursor.fetchone() is not None
     
     db.close()
-    return is_creator or is_admin
+    return is_member
 
 def get_channel_admins(channel_id):
     """Получает список администраторов канала"""
@@ -272,7 +294,6 @@ def api_login():
             
     except sqlite3.OperationalError as e:
         if "no such table" in str(e):
-            # Попытка переинициализировать БД при ошибке
             try:
                 init_db()
                 return jsonify({'success': False, 'error': 'База данных переинициализирована, попробуйте снова'})
@@ -678,7 +699,7 @@ def api_subscribe_channel():
                     "INSERT OR IGNORE INTO channel_subscribers (channel_id, user_id) VALUES (?, ?)",
                     (channel_id, session['user_id'])
                 )
-                message = 'Подпика оформлена'
+                message = 'Подписка оформлена'
             else:
                 cursor.execute(
                     "DELETE FROM channel_subscribers WHERE channel_id = ? AND user_id = ?",
@@ -836,11 +857,7 @@ def api_send_message():
                     return jsonify({'success': False, 'error': 'Укажите группу'}), 400
                 
                 # Проверяем, что пользователь состоит в группе
-                cursor.execute(
-                    "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?",
-                    (group_id, session['user_id'])
-                )
-                if not cursor.fetchone():
+                if not is_group_member(group_id, session['user_id']):
                     db.close()
                     return jsonify({'success': False, 'error': 'Вы не состоите в этой группе'}), 403
                 
@@ -851,6 +868,15 @@ def api_send_message():
             else:  # channel
                 if not channel_id:
                     return jsonify({'success': False, 'error': 'Укажите канал'}), 400
+                
+                # Проверяем, что пользователь подписан на канал
+                cursor.execute(
+                    "SELECT 1 FROM channel_subscribers WHERE channel_id = ? AND user_id = ?",
+                    (channel_id, session['user_id'])
+                )
+                if not cursor.fetchone():
+                    db.close()
+                    return jsonify({'success': False, 'error': 'Вы не подписаны на этот канал'}), 403
                 
                 # Проверяем, что пользователь является администратором канала
                 if not is_channel_admin(channel_id, session['user_id']):
@@ -1471,6 +1497,7 @@ with open('templates/index.html', 'w', encoding='utf-8') as f:
         let currentChatType = null;
         let selectedUsers = [];
         let currentChannelId = null;
+        let currentUser = null;
 
         // Проверка авторизации при загрузке
         async function checkAuth() {
@@ -1479,6 +1506,7 @@ with open('templates/index.html', 'w', encoding='utf-8') as f:
                 const data = await response.json();
                 
                 if (data.success) {
+                    currentUser = data.username;
                     showMessengerInterface(data.username);
                     loadChatLists();
                 } else {
@@ -1530,6 +1558,7 @@ with open('templates/index.html', 'w', encoding='utf-8') as f:
                 const data = await response.json();
                 
                 if (data.success) {
+                    currentUser = data.username;
                     showMessengerInterface(data.username);
                     loadChatLists();
                 } else {
@@ -1577,6 +1606,7 @@ with open('templates/index.html', 'w', encoding='utf-8') as f:
         async function logout() {
             try {
                 await fetch('/api/logout');
+                currentUser = null;
                 showAuthInterface();
             } catch (error) {
                 console.error('Ошибка выхода:', error);
@@ -1656,9 +1686,10 @@ with open('templates/index.html', 'w', encoding='utf-8') as f:
                         const li = document.createElement('li');
                         li.className = 'chat-item';
                         li.innerHTML = `
-                            <strong>${channel.name}</strong><br>
-                            <small>Подписчиков: ${channel.subscriber_count}</small>
+                            <strong>${channel.name}</strong>
                             ${channel.is_admin ? '<span class="channel-admin-badge">Админ</span>' : ''}
+                            <br>
+                            <small>Подписчиков: ${channel.subscriber_count}</small>
                         `;
                         li.onclick = () => openChat('channel', channel.id, channel.name);
                         channelsList.appendChild(li);
@@ -1682,7 +1713,7 @@ with open('templates/index.html', 'w', encoding='utf-8') as f:
             // Показываем кнопки управления только для администраторов каналов
             if (chatType === 'channel') {
                 const channel = await getChannelInfo(chatId);
-                if (channel.is_admin) {
+                if (channel && channel.is_admin) {
                     document.getElementById('channel-actions').style.display = 'block';
                 } else {
                     document.getElementById('channel-actions').style.display = 'none';

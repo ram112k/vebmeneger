@@ -1,3 +1,4 @@
+
 from flask import Flask, render_template, request, jsonify, session
 import sqlite3
 import hashlib
@@ -37,9 +38,9 @@ def init_db():
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sender_id INTEGER NOT NULL,
-                receiver_id INTEGER NOT NULL,
+                receiver_id INTEGER,
                 message_text TEXT NOT NULL,
-                message_type TEXT DEFAULT 'private', -- 'private', 'group'
+                message_type TEXT DEFAULT 'private',
                 group_id INTEGER DEFAULT NULL,
                 is_read INTEGER DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -93,7 +94,7 @@ def init_db():
                     print(f"Создан тестовый пользователь: {username}")
                 except sqlite3.IntegrityError:
                     print(f"Пользователь {username} уже существует")
-                    pass
+                    continue
             
             # Создаем тестовую группу
             cursor.execute(
@@ -104,10 +105,13 @@ def init_db():
             
             # Добавляем всех пользователей в группу
             for user_id in [1, 2, 3, 4, 5]:
-                cursor.execute(
-                    "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)",
-                    (group_id, user_id)
-                )
+                try:
+                    cursor.execute(
+                        "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)",
+                        (group_id, user_id)
+                    )
+                except sqlite3.IntegrityError:
+                    continue
         
         db.commit()
         db.close()
@@ -115,6 +119,7 @@ def init_db():
         
     except Exception as e:
         print(f"❌ Ошибка инициализации БД: {e}")
+        raise e
 
 def hash_password(password):
     """Хеширование пароля"""
@@ -145,6 +150,9 @@ def api_login():
     """API для входа"""
     try:
         data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': 'Нет данных'})
+            
         username = data.get('username')
         password = data.get('password')
         
@@ -174,8 +182,8 @@ def api_login():
             try:
                 init_db()
                 return jsonify({'success': False, 'error': 'База данных переинициализирована, попробуйте снова'})
-            except:
-                return jsonify({'success': False, 'error': 'Ошибка базы данных. Попробуйте позже.'})
+            except Exception as init_error:
+                return jsonify({'success': False, 'error': f'Ошибка инициализации БД: {str(init_error)}'})
         return jsonify({'success': False, 'error': f'Ошибка базы данных: {str(e)}'})
     except Exception as e:
         return jsonify({'success': False, 'error': f'Ошибка сервера: {str(e)}'})
@@ -185,6 +193,9 @@ def api_register():
     """API для регистрации"""
     try:
         data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': 'Нет данных'})
+            
         username = data.get('username')
         phone = data.get('phone')
         password = data.get('password')
@@ -224,9 +235,11 @@ def api_register():
             try:
                 init_db()
                 return jsonify({'success': False, 'error': 'База данных переинициализирована, попробуйте снова'})
-            except:
-                return jsonify({'success': False, 'error': 'Ошибка базы данных. Попробуйте позже.'})
+            except Exception as init_error:
+                return jsonify({'success': False, 'error': f'Ошибка инициализации БД: {str(init_error)}'})
         return jsonify({'success': False, 'error': f'Ошибка базы данных: {str(e)}'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Ошибка сервера: {str(e)}'})
 
 @app.route('/api/users')
 def api_users():
@@ -253,6 +266,8 @@ def api_users():
             init_db()
             return jsonify({'success': True, 'users': []})
         return jsonify({'success': False, 'error': f'Ошибка базы данных: {str(e)}'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Ошибка сервера: {str(e)}'})
 
 @app.route('/api/groups')
 def api_groups():
@@ -285,6 +300,8 @@ def api_groups():
             init_db()
             return jsonify({'success': True, 'groups': []})
         return jsonify({'success': False, 'error': f'Ошибка базы данных: {str(e)}'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Ошибка сервера: {str(e)}'})
 
 @app.route('/api/create_group', methods=['POST'])
 def api_create_group():
@@ -294,6 +311,9 @@ def api_create_group():
             return jsonify({'success': False, 'error': 'Требуется авторизация'}), 401
         
         data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': 'Нет данных'})
+            
         name = data.get('name')
         description = data.get('description', '')
         member_ids = data.get('member_ids', [])
@@ -321,10 +341,13 @@ def api_create_group():
             # Добавляем выбранных участников
             for user_id in member_ids:
                 if user_id != session['user_id']:  # Не добавляем себя повторно
-                    cursor.execute(
-                        "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)",
-                        (group_id, user_id)
-                    )
+                    try:
+                        cursor.execute(
+                            "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)",
+                            (group_id, user_id)
+                        )
+                    except sqlite3.IntegrityError:
+                        continue  # Пропускаем если пользователь уже в группе
             
             db.commit()
             db.close()
@@ -339,6 +362,8 @@ def api_create_group():
             init_db()
             return jsonify({'success': False, 'error': 'База данных переинициализирована, попробуйте снова'})
         return jsonify({'success': False, 'error': f'Ошибка базы данных: {str(e)}'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Ошибка сервера: {str(e)}'})
 
 @app.route('/api/messages')
 def api_messages():
@@ -347,7 +372,7 @@ def api_messages():
         if 'user_id' not in session:
             return jsonify({'success': False, 'error': 'Требуется авторизация'}), 401
         
-        chat_type = request.args.get('type', 'private')  # 'private', 'group'
+        chat_type = request.args.get('type', 'private')
         chat_id = request.args.get('id')
         
         if not chat_id:
@@ -366,7 +391,7 @@ def api_messages():
                    OR (m.sender_id = ? AND m.receiver_id = ?)
                 ORDER BY m.created_at
             ''', (session['user_id'], chat_id, chat_id, session['user_id']))
-        else:  # group
+        else:
             # Проверяем, что пользователь состоит в группе
             cursor.execute(
                 "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?",
@@ -413,6 +438,8 @@ def api_messages():
             init_db()
             return jsonify({'success': True, 'messages': []})
         return jsonify({'success': False, 'error': f'Ошибка базы данных: {str(e)}'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Ошибка сервера: {str(e)}'})
 
 @app.route('/api/send_message', methods=['POST'])
 def api_send_message():
@@ -422,7 +449,10 @@ def api_send_message():
             return jsonify({'success': False, 'error': 'Требуется авторизация'}), 401
         
         data = request.get_json()
-        message_type = data.get('type', 'private')  # 'private', 'group'
+        if not data:
+            return jsonify({'success': False, 'error': 'Нет данных'})
+            
+        message_type = data.get('type', 'private')
         receiver_id = data.get('receiver_id')
         group_id = data.get('group_id')
         message_text = data.get('message_text', '').strip()
@@ -442,7 +472,7 @@ def api_send_message():
                     "INSERT INTO messages (sender_id, receiver_id, message_text, message_type) VALUES (?, ?, ?, 'private')",
                     (session['user_id'], receiver_id, message_text)
                 )
-            else:  # group
+            else:
                 if not group_id:
                     return jsonify({'success': False, 'error': 'Укажите группу'}), 400
                 
@@ -469,6 +499,8 @@ def api_send_message():
             init_db()
             return jsonify({'success': False, 'error': 'База данных переинициализирована, попробуйте снова'})
         return jsonify({'success': False, 'error': f'Ошибка базы данных: {str(e)}'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Ошибка сервера: {str(e)}'})
 
 @app.route('/api/logout')
 def api_logout():
@@ -480,17 +512,16 @@ def api_logout():
 def api_check_auth():
     """API для проверки авторизации"""
     try:
-        if 'user_id' in session:
+        if 'user_id' in session and 'username' in session:
             return jsonify({'success': True, 'username': session['username']})
         return jsonify({'success': False})
-    except:
-        return jsonify({'success': False})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/health')
 def api_health():
     """API для проверки здоровья приложения"""
     try:
-        # Проверяем подключение к БД
         db = get_db()
         db.execute("SELECT 1")
         db.close()
@@ -1017,406 +1048,422 @@ with open('templates/index.html', 'w', encoding='utf-8') as f:
         }
 
         // Переключение между вкладками входа/регистрации
-        function showTab(tabName) {
-            document.getElementById('login-form').style.display = tabName === 'login' ? 'block' : 'none';
-            document.getElementById('register-form').style.display = tabName === 'register' ? 'block' : 'none';
+        function showTab(tabName)function showTab(tabName) {
+    document.getElementById('login-form').style.display = tabName === 'login' ? 'block' : 'none';
+    document.getElementById('register-form').style.display = tabName === 'register' ? 'block' : 'none';
+    
+    const tabs = document.querySelectorAll('.auth-tab');
+    tabs.forEach(tab => tab.classList.remove('active'));
+    
+    const activeTab = document.querySelector(`.auth-tab:nth-child(${tabName === 'login' ? 1 : 2})`);
+    activeTab.classList.add('active');
+    
+    // Очищаем сообщения об ошибках
+    document.getElementById('login-error').style.display = 'none';
+    document.getElementById('register-error').style.display = 'none';
+    document.getElementById('register-success').style.display = 'none';
+}
+
+// Функция входа
+async function login() {
+    const username = document.getElementById('login-username').value;
+    const password = document.getElementById('login-password').value;
+    const errorDiv = document.getElementById('login-error');
+    
+    if (!username || !password) {
+        errorDiv.textContent = 'Заполните все поля';
+        errorDiv.style.display = 'block';
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ username, password })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            currentUser = data.username;
+            showMessengerInterface(data.username);
+            loadChatLists();
+        } else {
+            errorDiv.textContent = data.error || 'Ошибка входа';
+            errorDiv.style.display = 'block';
+        }
+    } catch (error) {
+        errorDiv.textContent = 'Ошибка соединения';
+        errorDiv.style.display = 'block';
+    }
+}
+
+// Функция регистрации
+async function register() {
+    const username = document.getElementById('register-username').value;
+    const phone = document.getElementById('register-phone').value;
+    const password = document.getElementById('register-password').value;
+    const confirm = document.getElementById('register-confirm').value;
+    const errorDiv = document.getElementById('register-error');
+    const successDiv = document.getElementById('register-success');
+    
+    errorDiv.style.display = 'none';
+    successDiv.style.display = 'none';
+    
+    if (!username || !phone || !password || !confirm) {
+        errorDiv.textContent = 'Заполните все поля';
+        errorDiv.style.display = 'block';
+        return;
+    }
+    
+    if (password !== confirm) {
+        errorDiv.textContent = 'Пароли не совпадают';
+        errorDiv.style.display = 'block';
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/register', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ username, phone, password, confirm })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            successDiv.textContent = data.message || 'Регистрация успешна!';
+            successDiv.style.display = 'block';
             
-            const tabs = document.querySelectorAll('.auth-tab');
-            tabs.forEach(tab => tab.classList.remove('active'));
-            event.target.classList.add('active');
-        }
-
-        // Вход
-        async function login() {
-            const username = document.getElementById('login-username').value;
-            const password = document.getElementById('login-password').value;
+            // Очищаем форму
+            document.getElementById('register-username').value = '';
+            document.getElementById('register-phone').value = '';
+            document.getElementById('register-password').value = '';
+            document.getElementById('register-confirm').value = '';
             
-            try {
-                const response = await fetch('/api/login', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ username, password })
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    currentUser = data.username;
-                    showMessengerInterface(data.username);
-                    loadChatLists();
-                } else {
-                    showError('login-error', data.error);
-                }
-            } catch (error) {
-                    showError('login-error', 'Ошибка соединения');
-            }
+            // Переключаем на вкладку входа
+            setTimeout(() => showTab('login'), 2000);
+        } else {
+            errorDiv.textContent = data.error || 'Ошибка регистрации';
+            errorDiv.style.display = 'block';
         }
+    } catch (error) {
+        errorDiv.textContent = 'Ошибка соединения';
+        errorDiv.style.display = 'block';
+    }
+}
 
-        // Регистрация
-        async function register() {
-            const username = document.getElementById('register-username').value;
-            const phone = document.getElementById('register-phone').value;
-            const password = document.getElementById('register-password').value;
-            const confirm = document.getElementById('register-confirm').value;
-            
-            try {
-                const response = await fetch('/api/register', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ username, phone, password, confirm })
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    showSuccess('register-success', data.message);
-                    // Очищаем форму
-                    document.getElementById('register-username').value = '';
-                    document.getElementById('register-phone').value = '';
-                    document.getElementById('register-password').value = '';
-                    document.getElementById('register-confirm').value = '';
-                } else {
-                    showError('register-error', data.error);
-                }
-            } catch (error) {
-                showError('register-error', 'Ошибка соединения');
-            }
-        }
+// Функция выхода
+async function logout() {
+    try {
+        await fetch('/api/logout');
+        currentUser = null;
+        currentChat = null;
+        showAuthInterface();
+    } catch (error) {
+        console.error('Ошибка выхода:', error);
+    }
+}
 
-        // Выход
-        async function logout() {
-            try {
-                await fetch('/api/logout');
-                currentUser = null;
-                showAuthInterface();
-            } catch (error) {
-                console.error('Ошибка выхода:', error);
-            }
-        }
-
-        // Загрузка списков чатов
-        async function loadChatLists() {
-            await loadUsers();
-            await loadGroups();
-        }
-
+// Загрузка списков пользователей и групп
+async function loadChatLists() {
+    try {
         // Загрузка пользователей
-        async function loadUsers() {
-            try {
-                const response = await fetch('/api/users');
-                const data = await response.json();
-                
-                if (data.success) {
-                    const usersList = document.getElementById('users-list');
-                    usersList.innerHTML = '';
-                    
-                    data.users.forEach(user => {
-                        const li = document.createElement('li');
-                        li.className = 'chat-item';
-                        li.innerHTML = `
-                            <strong>${user.username}</strong><br>
-                            <small>${user.phone}</small>
-                        `;
-                        li.onclick = () => openChat('private', user.id, user.username);
-                        usersList.appendChild(li);
-                    });
-                }
-            } catch (error) {
-                console.error('Ошибка загрузки пользователей:', error);
-            }
+        const usersResponse = await fetch('/api/users');
+        const usersData = await usersResponse.json();
+        
+        if (usersData.success) {
+            const usersList = document.getElementById('users-list');
+            usersList.innerHTML = '';
+            
+            usersData.users.forEach(user => {
+                const li = document.createElement('li');
+                li.className = 'chat-item';
+                li.innerHTML = `
+                    <strong>${user.username}</strong>
+                    <br><small>${user.phone}</small>
+                `;
+                li.onclick = () => selectChat('private', user.id, user.username);
+                usersList.appendChild(li);
+            });
         }
-
+        
         // Загрузка групп
-        async function loadGroups() {
-            try {
-                const response = await fetch('/api/groups');
-                const data = await response.json();
-                
-                if (data.success) {
-                    const groupsList = document.getElementById('groups-list');
-                    groupsList.innerHTML = '';
-                    
-                    data.groups.forEach(group => {
-                        const li = document.createElement('li');
-                        li.className = 'chat-item';
-                        li.innerHTML = `
-                            <strong>${group.name}</strong><br>
-                            <small>Участников: ${group.member_count}</small>
-                        `;
-                        li.onclick = () => openChat('group', group.id, group.name);
-                        groupsList.appendChild(li);
-                    });
-                }
-            } catch (error) {
-                console.error('Ошибка загрузки групп:', error);
-            }
+        const groupsResponse = await fetch('/api/groups');
+        const groupsData = await groupsResponse.json();
+        
+        if (groupsData.success) {
+            const groupsList = document.getElementById('groups-list');
+            groupsList.innerHTML = '';
+            
+            groupsData.groups.forEach(group => {
+                const li = document.createElement('li');
+                li.className = 'chat-item';
+                li.innerHTML = `
+                    <strong>${group.name}</strong>
+                    <br><small>Участников: ${group.member_count}</small>
+                `;
+                li.onclick = () => selectChat('group', group.id, group.name);
+                groupsList.appendChild(li);
+            });
         }
+    } catch (error) {
+        console.error('Ошибка загрузки списков:', error);
+    }
+}
 
-        // Открыть чат
-        async function openChat(chatType, chatId, chatName) {
-            currentChat = chatId;
-            currentChatType = chatType;
-            
-            document.getElementById('current-chat').textContent = chatName;
-            document.getElementById('message-input').style.display = 'block';
-            
+// Выбор чата
+async function selectChat(type, id, name) {
+    currentChat = id;
+    currentChatType = type;
+    
+    // Подсвечиваем выбранный чат
+    document.querySelectorAll('.chat-item').forEach(item => {
+        item.classList.remove('active');
+    });
+    
+    // Обновляем заголовок
+    document.getElementById('current-chat').textContent = name;
+    document.getElementById('message-input').style.display = 'block';
+    
+    // Загружаем сообщения
+    await loadMessages();
+    
+    // Прокручиваем к последнему сообщению
+    setTimeout(() => {
+        const messagesContainer = document.getElementById('chat-messages');
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    }, 100);
+}
+
+// Загрузка сообщений
+async function loadMessages() {
+    if (!currentChat) return;
+    
+    try {
+        const response = await fetch(`/api/messages?type=${currentChatType}&id=${currentChat}`);
+        const data = await response.json();
+        
+        const messagesContainer = document.getElementById('chat-messages');
+        messagesContainer.innerHTML = '';
+        
+        if (data.success && data.messages.length > 0) {
+            data.messages.forEach(message => {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${message.is_own ? 'own' : ''}`;
+                
+                const date = new Date(message.created_at);
+                const timeString = date.toLocaleTimeString('ru-RU', { 
+                    hour: '2-digit', 
+                    minute: '2-digit' 
+                });
+                
+                messageDiv.innerHTML = `
+                    <div class="message-header">
+                        <span>${message.sender_name}</span>
+                        <span>${timeString}</span>
+                    </div>
+                    <div class="message-content">
+                        ${message.message_text}
+                    </div>
+                `;
+                
+                messagesContainer.appendChild(messageDiv);
+            });
+        } else {
+            messagesContainer.innerHTML = '<div class="loading">Нет сообщений</div>';
+        }
+    } catch (error) {
+        console.error('Ошибка загрузки сообщений:', error);
+    }
+}
+
+// Отправка сообщения
+async function sendMessage() {
+    if (!currentChat || !currentChatType) return;
+    
+    const messageInput = document.getElementById('message-text');
+    const messageText = messageInput.value.trim();
+    
+    if (!messageText) return;
+    
+    try {
+        const payload = {
+            message_text: messageText,
+            type: currentChatType
+        };
+        
+        if (currentChatType === 'private') {
+            payload.receiver_id = currentChat;
+        } else {
+            payload.group_id = currentChat;
+        }
+        
+        const response = await fetch('/api/send_message', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            messageInput.value = '';
             await loadMessages();
             
-            // Прокручиваем вниз к новым сообщениям
+            // Прокручиваем к последнему сообщению
             setTimeout(() => {
                 const messagesContainer = document.getElementById('chat-messages');
                 messagesContainer.scrollTop = messagesContainer.scrollHeight;
             }, 100);
+        } else {
+            alert('Ошибка отправки: ' + (data.error || 'Неизвестная ошибка'));
         }
+    } catch (error) {
+        console.error('Ошибка отправки сообщения:', error);
+        alert('Ошибка соединения');
+    }
+}
 
-        // Загрузка сообщений
-        async function loadMessages() {
-            try {
-                const response = await fetch(`/api/messages?type=${currentChatType}&id=${currentChat}`);
-                const data = await response.json();
-                
-                const messagesContainer = document.getElementById('chat-messages');
-                messagesContainer.innerHTML = '';
-                
-                if (data.success && data.messages.length > 0) {
-                    data.messages.forEach(message => {
-                        const messageDiv = document.createElement('div');
-                        messageDiv.className = `message ${message.is_own ? 'own' : ''} fade-in`;
-                        
-                        const date = new Date(message.created_at);
-                        const time = date.toLocaleTimeString('ru-RU', { 
-                            hour: '2-digit', 
-                            minute: '2-digit' 
-                        });
-                        
-                        messageDiv.innerHTML = `
-                            <div class="message-header">
-                                <span>${message.sender_name}</span>
-                                <span>${time}</span>
-                            </div>
-                            <div class="message-content">
-                                ${escapeHtml(message.message_text)}
-                            </div>
-                        `;
-                        
-                        messagesContainer.appendChild(messageDiv);
-                    });
-                } else {
-                    messagesContainer.innerHTML = '<div class="loading">Сообщений пока нет</div>';
-                }
-            } catch (error) {
-                console.error('Ошибка загрузки сообщений:', error);
-            }
+// Обработка нажатия Enter для отправки
+function handleKeyPress(event) {
+    if (event.key === 'Enter') {
+        sendMessage();
+    }
+}
+
+// Модальное окно создания группы
+function showCreateGroupModal() {
+    loadUsersForGroup();
+    document.getElementById('create-group-modal').style.display = 'block';
+}
+
+function closeModal(modalId) {
+    document.getElementById(modalId).style.display = 'none';
+    selectedUsers = [];
+}
+
+// Загрузка пользователей для выбора в группу
+async function loadUsersForGroup() {
+    try {
+        const response = await fetch('/api/users');
+        const data = await response.json();
+        
+        const usersContainer = document.getElementById('group-users-select');
+        usersContainer.innerHTML = '';
+        
+        if (data.success) {
+            data.users.forEach(user => {
+                const userDiv = document.createElement('div');
+                userDiv.className = 'user-select-item';
+                userDiv.textContent = user.username;
+                userDiv.onclick = () => toggleUserSelection(user.id, userDiv);
+                usersContainer.appendChild(userDiv);
+            });
         }
+    } catch (error) {
+        console.error('Ошибка загрузки пользователей:', error);
+    }
+}
 
-        // Отправка сообщения
-        async function sendMessage() {
-            const messageText = document.getElementById('message-text').value.trim();
-            
-            if (!messageText) return;
-            
-            try {
-                const messageData = {
-                    type: currentChatType,
-                    message_text: messageText
-                };
-                
-                if (currentChatType === 'private') {
-                    messageData.receiver_id = currentChat;
-                } else if (currentChatType === 'group') {
-                    messageData.group_id = currentChat;
-                }
-                
-                const response = await fetch('/api/send_message', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(messageData)
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    document.getElementById('message-text').value = '';
-                    await loadMessages();
-                    
-                    // Прокручиваем к новому сообщению
-                    const messagesContainer = document.getElementById('chat-messages');
-                    messagesContainer.scrollTop = messagesContainer.scrollHeight;
-                } else {
-                    alert('Ошибка: ' + data.error);
-                }
-            } catch (error) {
-                console.error('Ошибка отправки сообщения:', error);
-                alert('Ошибка отправки сообщения');
-            }
-        }
+// Переключение выбора пользователя
+function toggleUserSelection(userId, element) {
+    const index = selectedUsers.indexOf(userId);
+    
+    if (index === -1) {
+        selectedUsers.push(userId);
+        element.classList.add('selected');
+    } else {
+        selectedUsers.splice(index, 1);
+        element.classList.remove('selected');
+    }
+}
 
-        // Обработка нажатия Enter для отправки сообщения
-        function handleKeyPress(event) {
-            if (event.key === 'Enter') {
-                sendMessage();
-            }
-        }
-
-        // Показать модальное окно создания группы
-        async function showCreateGroupModal() {
-            await loadUsersForSelection();
-            document.getElementById('create-group-modal').style.display = 'block';
-        }
-
-        // Закрыть модальное окно
-        function closeModal(modalId) {
-            document.getElementById(modalId).style.display = 'none';
-        }
-
-        // Загрузка пользователей для выбора в группу
-        async function loadUsersForSelection() {
-            try {
-                const response = await fetch('/api/users');
-                const data = await response.json();
-                
-                if (data.success) {
-                    const container = document.getElementById('group-users-select');
-                    container.innerHTML = '';
-                    selectedUsers = [];
-                    
-                    data.users.forEach(user => {
-                        const div = document.createElement('div');
-                        div.className = 'user-select-item';
-                        div.innerHTML = user.username;
-                        div.onclick = () => toggleUserSelection(user.id, div);
-                        container.appendChild(div);
-                    });
-                }
-            } catch (error) {
-                console.error('Ошибка загрузки пользователей:', error);
-            }
-        }
-
-        // Переключение выбора пользователя
-        function toggleUserSelection(userId, element) {
-            const index = selectedUsers.indexOf(userId);
-            
-            if (index === -1) {
-                selectedUsers.push(userId);
-                element.classList.add('selected');
-            else:
-                selectedUsers.splice(index, 1);
-                element.classList.remove('selected');
-            }
-        }
-
-        // Создание группы
-        async function createGroup() {
-            const name = document.getElementById('group-name').value.trim();
-            const description = document.getElementById('group-description').value.trim();
-            
-            if (!name) {
-                alert('Введите название группы');
-                return;
-            }
-            
-            try {
-                const response = await fetch('/api/create_group', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        name,
-                        description,
-                        member_ids: selectedUsers
-                    })
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    closeModal('create-group-modal');
-                    alert('Группа создана успешно!');
-                    await loadGroups();
-                    
-                    // Очищаем форму
-                    document.getElementById('group-name').value = '';
-                    document.getElementById('group-description').value = '';
-                } else {
-                    alert('Ошибка: ' + data.error);
-                }
-            } catch (error) {
-                console.error('Ошибка создания группы:', error);
-                alert('Ошибка создания группы');
-            }
-        }
-
-        // Вспомогательные функции
-        function showError(elementId, message) {
-            const element = document.getElementById(elementId);
-            element.textContent = message;
-            element.style.display = 'block';
-            
-            // Скрываем ошибку через 5 секунд
-            setTimeout(() => {
-                element.style.display = 'none';
-            }, 5000);
-        }
-
-        function showSuccess(elementId, message) {
-            const element = document.getElementById(elementId);
-            element.textContent = message;
-            element.style.display = 'block';
-            
-            // Скрываем успех через 5 секунд
-            setTimeout(() => {
-                element.style.display = 'none';
-            }, 5000);
-        }
-
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
-        // Инициализация при загрузке
-        document.addEventListener('DOMContentLoaded', function() {
-            checkAuth();
-            
-            // Закрытие модальных окон при клике вне их
-            window.onclick = function(event) {
-                const modals = document.getElementsByClassName('modal');
-                for (let modal of modals) {
-                    if (event.target === modal) {
-                        modal.style.display = 'none';
-                    }
-                }
-            }
-            
-            // Автообновление сообщений каждые 5 секунд
-            setInterval(async () => {
-                if (currentChat) {
-                    await loadMessages();
-                }
-            }, 5000);
+// Создание группы
+async function createGroup() {
+    const name = document.getElementById('group-name').value.trim();
+    const description = document.getElementById('group-description').value.trim();
+    
+    if (!name) {
+        alert('Введите название группы');
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/create_group', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                name,
+                description,
+                member_ids: selectedUsers
+            })
         });
-    </script>
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            alert('Группа создана успешно!');
+            closeModal('create-group-modal');
+            loadChatLists(); // Обновляем список групп
+            
+            // Очищаем форму
+            document.getElementById('group-name').value = '';
+            document.getElementById('group-description').value = '';
+            selectedUsers = [];
+        } else {
+            alert('Ошибка создания группы: ' + (data.error || 'Неизвестная ошибка'));
+        }
+    } catch (error) {
+        console.error('Ошибка создания группы:', error);
+        alert('Ошибка соединения');
+    }
+}
+
+// Закрытие модального окна при клике вне его
+window.onclick = function(event) {
+    const modal = document.getElementById('create-group-modal');
+    if (event.target === modal) {
+        closeModal('create-group-modal');
+    }
+}
+
+// Инициализация при загрузке страницы
+document.addEventListener('DOMContentLoaded', function() {
+    checkAuth();
+    
+    // Обработка нажатия Enter в формах
+    document.getElementById('login-password').addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') login();
+    });
+    
+    document.getElementById('register-confirm').addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') register();
+    });
+});
+</script>
 </body>
 </html>
 ''')
 
 if __name__ == '__main__':
     # Инициализация базы данных
-    init_db()
+    try:
+        init_db()
+        print("✅ База данных инициализирована")
+    except Exception as e:
+        print(f"❌ Ошибка инициализации БД: {e}")
     
     # Запуск приложения
-    print("🚀 Messenger App запущен на http://localhost:5000")
-    print("📱 Приложение адаптировано для телефонов и ПК")
-    print("👥 Доступны только личные чаты и группы")
-    print("⚡ Для остановки нажмите Ctrl+C")
-    
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    print("🚀 Запуск Flask приложения...")
+    print("📧 Мессенджер доступен по адресу: http://localhost:5000")
+    app.run(debug=True, host='0.0.0.0', port=5000)

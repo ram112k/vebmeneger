@@ -39,7 +39,7 @@ def init_db():
                 sender_id INTEGER NOT NULL,
                 receiver_id INTEGER NOT NULL,
                 message_text TEXT NOT NULL,
-                message_type TEXT DEFAULT 'private', -- 'private', 'group'
+                message_type TEXT DEFAULT 'private', -- 'private' или 'group'
                 group_id INTEGER DEFAULT NULL,
                 is_read INTEGER DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -79,9 +79,7 @@ def init_db():
             test_users = [
                 ('alex', '+79161234567', hash_password('password123')),
                 ('maria', '+79269876543', hash_password('password123')),
-                ('ivan', '+79031112233', hash_password('password123')),
-                ('sophia', '+79051112233', hash_password('password123')),
-                ('maxim', '+79061112233', hash_password('password123'))
+                ('ivan', '+79031112233', hash_password('password123'))
             ]
             
             for username, phone, pwd_hash in test_users:
@@ -103,7 +101,7 @@ def init_db():
             group_id = cursor.lastrowid
             
             # Добавляем всех пользователей в группу
-            for user_id in [1, 2, 3, 4, 5]:
+            for user_id in [1, 2, 3]:
                 cursor.execute(
                     "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)",
                     (group_id, user_id)
@@ -119,20 +117,6 @@ def init_db():
 def hash_password(password):
     """Хеширование пароля"""
     return hashlib.sha256(password.encode()).hexdigest()
-
-def is_group_member(group_id, user_id):
-    """Проверяет, является ли пользователь участником группы"""
-    db = get_db()
-    cursor = db.cursor()
-    
-    cursor.execute(
-        "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?",
-        (group_id, user_id)
-    )
-    is_member = cursor.fetchone() is not None
-    
-    db.close()
-    return is_member
 
 @app.route('/')
 def index():
@@ -171,6 +155,7 @@ def api_login():
             
     except sqlite3.OperationalError as e:
         if "no such table" in str(e):
+            # Попытка переинициализировать БД при ошибке
             try:
                 init_db()
                 return jsonify({'success': False, 'error': 'База данных переинициализирована, попробуйте снова'})
@@ -265,8 +250,7 @@ def api_groups():
         cursor = db.cursor()
         
         cursor.execute('''
-            SELECT g.id, g.name, g.description, g.creator_id, u.username as creator_name,
-                   (SELECT COUNT(*) FROM group_members WHERE group_id = g.id) as member_count
+            SELECT g.id, g.name, g.description, g.creator_id, u.username as creator_name
             FROM groups g
             JOIN users u ON g.creator_id = u.id
             JOIN group_members gm ON g.id = gm.group_id
@@ -321,14 +305,10 @@ def api_create_group():
             # Добавляем выбранных участников
             for user_id in member_ids:
                 if user_id != session['user_id']:  # Не добавляем себя повторно
-                    try:
-                        cursor.execute(
-                            "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)",
-                            (group_id, user_id)
-                        )
-                    except sqlite3.IntegrityError:
-                        # Пропускаем если пользователь уже в группе
-                        pass
+                    cursor.execute(
+                        "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)",
+                        (group_id, user_id)
+                    )
             
             db.commit()
             db.close()
@@ -351,7 +331,7 @@ def api_messages():
         if 'user_id' not in session:
             return jsonify({'success': False, 'error': 'Требуется авторизация'}), 401
         
-        chat_type = request.args.get('type', 'private')  # 'private', 'group'
+        chat_type = request.args.get('type', 'private')  # 'private' или 'group'
         chat_id = request.args.get('id')
         
         if not chat_id:
@@ -426,7 +406,7 @@ def api_send_message():
             return jsonify({'success': False, 'error': 'Требуется авторизация'}), 401
         
         data = request.get_json()
-        message_type = data.get('type', 'private')  # 'private', 'group'
+        message_type = data.get('type', 'private')  # 'private' или 'group'
         receiver_id = data.get('receiver_id')
         group_id = data.get('group_id')
         message_text = data.get('message_text', '').strip()
@@ -451,7 +431,11 @@ def api_send_message():
                     return jsonify({'success': False, 'error': 'Укажите группу'}), 400
                 
                 # Проверяем, что пользователь состоит в группе
-                if not is_group_member(group_id, session['user_id']):
+                cursor.execute(
+                    "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?",
+                    (group_id, session['user_id'])
+                )
+                if not cursor.fetchone():
                     db.close()
                     return jsonify({'success': False, 'error': 'Вы не состоите в этой группе'}), 403
                 
@@ -506,489 +490,169 @@ def api_health():
 if not os.path.exists('templates'):
     os.makedirs('templates')
 
-# HTML шаблон
-with open('templates/index.html', 'w', encoding='utf-8') as f:
-    f.write('''
+# HTML шаблон для SPA
+spa_html = '''
 <!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Messenger App</title>
+    <title>💬 Web Messenger</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 15px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
-            overflow: hidden;
-            min-height: 80vh;
-        }
-
-        /* Аутентификация */
-        .auth-container {
-            padding: 40px;
-            text-align: center;
-        }
-
-        .auth-form {
-            max-width: 400px;
-            margin: 0 auto;
-            background: #f8f9fa;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
-        }
-
-        .auth-tabs {
-            display: flex;
-            margin-bottom: 20px;
-            border-radius: 8px;
-            overflow: hidden;
-        }
-
-        .auth-tab {
-            flex: 1;
-            padding: 15px;
-            background: #e9ecef;
-            border: none;
-            cursor: pointer;
-            font-weight: 500;
-            transition: background 0.3s;
-            color: #000;
-        }
-
-        .auth-tab.active {
-            background: #8B5FBF;
-            color: white;
-        }
-
-        .form-group {
-            margin-bottom: 20px;
-            text-align: left;
-        }
-
-        .form-group label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: 500;
-            color: #333;
-        }
-
-        .form-control {
-            width: 100%;
-            padding: 12px;
-            border: 2px solid #ddd;
-            border-radius: 6px;
-            font-size: 16px;
-            transition: border-color 0.3s;
-        }
-
-        .form-control:focus {
-            outline: none;
-            border-color: #8B5FBF;
-        }
-
-        .btn {
-            width: 100%;
-            padding: 12px;
-            background: #8B5FBF;
-            color: white;
-            border: none;
-            border-radius: 6px;
-            font-size: 16px;
-            cursor: pointer;
-            transition: background 0.3s;
-        }
-
-        .btn:hover {
-            background: #6A4A9C;
-        }
-
-        .btn-secondary {
-            background: #9370DB;
-        }
-
-        .btn-secondary:hover {
-            background: #7B68EE;
-        }
-
-        .error-message {
-            color: #dc3545;
-            margin-top: 10px;
-            padding: 10px;
-            background: #f8d7da;
-            border-radius: 5px;
-            border: 1px solid #f5c6cb;
-        }
-
-        .success-message {
-            color: #155724;
-            margin-top: 10px;
-            padding: 10px;
-            background: #d4edda;
-            border-radius: 5px;
-            border: 1px solid #c3e6cb;
-        }
-
-        /* Основной интерфейс */
-        .messenger-container {
-            display: flex;
-            height: 80vh;
-        }
-
-        .sidebar {
-            width: 300px;
-            background: #f8f9fa;
-            border-right: 1px solid #dee2e6;
-            padding: 20px;
-            overflow-y: auto;
-        }
-
-        .main-content {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-        }
-
-        .chat-header {
-            padding: 20px;
-            background: white;
-            border-bottom: 1px solid #dee2e6;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .chat-messages {
-            flex: 1;
-            padding: 20px;
-            overflow-y: auto;
-            background: #f8f9fa;
-        }
-
-        .message-input {
-            padding: 20px;
-            background: white;
-            border-top: 1px solid #dee2e6;
-        }
-
-        .chat-list {
-            list-style: none;
-        }
-
-        .chat-item {
-            padding: 15px;
-            border-bottom: 1px solid #eee;
-            cursor: pointer;
-            transition: background 0.3s;
-            border-radius: 8px;
-            margin-bottom: 5px;
-        }
-
-        .chat-item:hover {
-            background: #e9ecef;
-        }
-
-        .chat-item.active {
-            background: #8B5FBF;
-            color: white;
-        }
-
-        .message {
-            margin-bottom: 15px;
-            max-width: 70%;
-        }
-
-        .message.own {
-            margin-left: auto;
-        }
-
-        .message-content {
-            padding: 12px;
-            border-radius: 12px;
-            background: white;
-            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
-        }
-
-        .message.own .message-content {
-            background: #8B5FBF;
-            color: white;
-        }
-
-        .message-header {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 5px;
-            font-size: 12px;
-            color: #666;
-        }
-
-        .message.own .message-header {
-            color: rgba(255, 255, 255, 0.8);
-        }
-
-        /* Адаптивность */
-        @media (max-width: 768px) {
-            .container {
-                margin: 10px;
-                border-radius: 10px;
-            }
-
-            .auth-container {
-                padding: 20px;
-            }
-
-            .auth-form {
-                padding: 20px;
-            }
-
-            .messenger-container {
-                flex-direction: column;
-                height: auto;
-            }
-
-            .sidebar {
-                width: 100%;
-                border-right: none;
-                border-bottom: 1px solid #dee2e6;
-                max-height: 300px;
-            }
-
-            .chat-messages {
-                min-height: 400px;
-            }
-
-            .message {
-                max-width: 85%;
-            }
-        }
-
-        @media (max-width: 480px) {
-            body {
-                padding: 10px;
-            }
-
-            .container {
-                margin: 5px;
-                border-radius: 8px;
-            }
-
-            .auth-tabs {
-                flex-direction: column;
-            }
-
-            .message {
-                max-width: 95%;
-            }
-
-            .form-control, .btn {
-                padding: 10px;
-            }
-        }
-
-        /* Улучшенная анимация */
-        .fade-in {
-            animation: fadeIn 0.3s ease-in;
-        }
-
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        .loading {
-            text-align: center;
-            padding: 20px;
-            color: #666;
-        }
-
-        .create-buttons {
-            margin-bottom: 20px;
-        }
-
-        .create-buttons button {
-            margin-right: 10px;
-            margin-bottom: 10px;
-        }
-
-        .modal {
-            display: none;
-            position: fixed;
-            z-index: 1000;
-            left: 0;
-            top: 0;
-            width: 100%;
-            height: 100%;
-            background-color: rgba(0, 0, 0, 0.5);
-        }
-
-        .modal-content {
-            background-color: white;
-            margin: 10% auto;
-            padding: 20px;
-            border-radius: 10px;
-            width: 90%;
-            max-width: 500px;
-            max-height: 80vh;
-            overflow-y: auto;
-        }
-
-        .close {
-            float: right;
-            font-size: 24px;
-            font-weight: bold;
-            cursor: pointer;
-        }
-
-        .user-select {
-            max-height: 200px;
-            overflow-y: auto;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            padding: 10px;
-            margin-top: 10px;
-        }
-
-        .user-select-item {
-            padding: 8px;
-            border-bottom: 1px solid #eee;
-            cursor: pointer;
-        }
-
-        .user-select-item:hover {
-            background: #f0f0f0;
-        }
-
-        .user-select-item.selected {
-            background: #8B5FBF;
-            color: white;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        
+        .auth-container { display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        .auth-box { background: white; padding: 40px; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); width: 100%; max-width: 400px; }
+        .auth-tabs { display: flex; margin-bottom: 20px; border-bottom: 2px solid #eee; }
+        .auth-tab { flex: 1; padding: 15px; text-align: center; cursor: pointer; border-bottom: 3px solid transparent; }
+        .auth-tab.active { border-bottom-color: #667eea; color: #667eea; font-weight: bold; }
+        .auth-form { display: none; }
+        .auth-form.active { display: block; }
+        input, textarea { width: 100%; padding: 12px; margin: 10px 0; border: 2px solid #ddd; border-radius: 8px; font-size: 16px; }
+        input:focus, textarea:focus { outline: none; border-color: #667eea; }
+        button { padding: 12px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; margin: 10px 0; }
+        button:hover { opacity: 0.9; }
+        .btn-small { padding: 8px 15px; font-size: 14px; }
+        .btn-danger { background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%); }
+        .error { color: #e74c3c; text-align: center; margin: 10px 0; padding: 10px; background: #f8d7da; border-radius: 5px; }
+        .success { color: #27ae60; text-align: center; margin: 10px 0; padding: 10px; background: #d4edda; border-radius: 5px; }
+        
+        .chat-container { display: none; background: white; border-radius: 15px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.2); height: 80vh; }
+        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; }
+        .chat-layout { display: flex; height: calc(100% - 60px); }
+        .sidebar { width: 300px; background: #f8f9fa; border-right: 1px solid #ddd; overflow-y: auto; display: flex; flex-direction: column; }
+        .sidebar-header { padding: 15px; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; }
+        .chat-list { flex: 1; overflow-y: auto; padding: 10px; }
+        .chat-item { padding: 12px; margin: 5px 0; background: white; border-radius: 8px; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; }
+        .chat-item:hover { background: #667eea; color: white; }
+        .chat-item.active { background: #667eea; color: white; }
+        .chat-item-icon { margin-right: 10px; font-size: 18px; }
+        .chat-main { flex: 1; display: flex; flex-direction: column; }
+        .chat-header { padding: 15px; background: white; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; }
+        .messages-container { flex: 1; padding: 20px; overflow-y: auto; background: #f8f9fa; display: flex; flex-direction: column; }
+        .message { max-width: 70%; margin: 10px 0; padding: 12px; border-radius: 15px; position: relative; }
+        .message-own { background: #667eea; color: white; margin-left: auto; border-bottom-right-radius: 5px; }
+        .message-other { background: white; color: #333; margin-right: auto; border-bottom-left-radius: 5px; border: 1px solid #ddd; }
+        .message-group { background: #e8f4f8; border-color: #b8e0f0; }
+        .message-time { font-size: 0.8em; opacity: 0.7; margin-top: 5px; }
+        .message-sender { font-weight: bold; margin-bottom: 5px; }
+        .message-input-area { padding: 15px; background: white; border-top: 1px solid #ddd; }
+        .message-input-container { display: flex; gap: 10px; }
+        .message-input { flex: 1; }
+        .message-actions { display: flex; gap: 5px; }
+        
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; }
+        .modal-content { background: white; margin: 10% auto; padding: 20px; border-radius: 15px; width: 90%; max-width: 500px; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .close-modal { font-size: 24px; cursor: pointer; }
+        .user-select-list { max-height: 200px; overflow-y: auto; margin: 10px 0; }
+        .user-select-item { padding: 10px; border: 1px solid #ddd; border-radius: 5px; margin: 5px 0; }
+        .checkbox-container { display: flex; align-items: center; gap: 10px; }
+        
+        .tabs { display: flex; border-bottom: 2px solid #eee; margin-bottom: 15px; }
+        .tab { padding: 10px 20px; cursor: pointer; border-bottom: 3px solid transparent; }
+        .tab.active { border-bottom-color: #667eea; color: #667eea; font-weight: bold; }
     </style>
 </head>
 <body>
     <div class="container">
-        <div id="auth-container" class="auth-container">
-            <div class="auth-form">
+        <div class="auth-container" id="authSection">
+            <div class="auth-box">
                 <div class="auth-tabs">
-                    <button class="auth-tab active" onclick="showTab('login')">Вход</button>
-                    <button class="auth-tab" onclick="showTab('register')">Регистрация</button>
+                    <div class="auth-tab active" onclick="showTab('login')">Вход</div>
+                    <div class="auth-tab" onclick="showTab('register')">Регистрация</div>
                 </div>
                 
-                <div id="login-form">
-                    <div class="form-group">
-                        <label for="login-username">Логин:</label>
-                        <input type="text" id="login-username" class="form-control" placeholder="Введите ваш логин">
-                    </div>
-                    <div class="form-group">
-                        <label for="login-password">Пароль:</label>
-                        <input type="password" id="login-password" class="form-control" placeholder="Введите ваш пароль">
-                    </div>
-                    <button class="btn" onclick="login()">Войти</button>
-                    <div id="login-error" class="error-message" style="display: none;"></div>
+                <div class="auth-form active" id="loginForm">
+                    <h2>🔐 Вход</h2>
+                    <div id="loginError" class="error" style="display: none;"></div>
+                    <input type="text" id="loginUsername" placeholder="Логин" value="alex">
+                    <input type="password" id="loginPassword" placeholder="Пароль" value="password123">
+                    <button onclick="login()">Войти</button>
                 </div>
                 
-                <div id="register-form" style="display: none;">
-                    <div class="form-group">
-                        <label for="register-username">Логин:</label>
-                        <input type="text" id="register-username" class="form-control" placeholder="Придумайте логин">
-                    </div>
-                    <div class="form-group">
-                        <label for="register-phone">Телефон:</label>
-                        <input type="tel" id="register-phone" class="form-control" placeholder="+79161234567">
-                    </div>
-                    <div class="form-group">
-                        <label for="register-password">Пароль:</label>
-                        <input type="password" id="register-password" class="form-control" placeholder="Придумайте пароль">
-                    </div>
-                    <div class="form-group">
-                        <label for="register-confirm">Подтверждение пароля:</label>
-                        <input type="password" id="register-confirm" class="form-control" placeholder="Повторите пароль">
-                    </div>
-                    <button class="btn" onclick="register()">Зарегистрироваться</button>
-                    <div id="register-error" class="error-message" style="display: none;"></div>
-                    <div id="register-success" class="success-message" style="display: none;"></div>
+                <div class="auth-form" id="registerForm">
+                    <h2>📝 Регистрация</h2>
+                    <div id="registerError" class="error" style="display: none;"></div>
+                    <input type="text" id="regUsername" placeholder="Логин">
+                    <input type="text" id="regPhone" placeholder="Телефон">
+                    <input type="password" id="regPassword" placeholder="Пароль">
+                    <input type="password" id="regConfirm" placeholder="Подтверждение пароля">
+                    <button onclick="register()">Зарегистрироваться</button>
                 </div>
             </div>
         </div>
-        
-        <div id="messenger-container" class="messenger-container" style="display: none;">
-            <div class="sidebar">
-                <div style="margin-bottom: 20px;">
-                    <h3>Добро пожаловать, <span id="username-display"></span>!</h3>
-                    <button class="btn btn-secondary" onclick="logout()" style="margin-top: 10px;">Выйти</button>
-                </div>
-                
-                <div class="create-buttons">
-                    <button class="btn" onclick="showCreateGroupModal()">Создать группу</button>
-                </div>
-                
-                <h4>Пользователи</h4>
-                <ul id="users-list" class="chat-list"></ul>
-                
-                <h4>Группы</h4>
-                <ul id="groups-list" class="chat-list"></ul>
+
+        <div class="chat-container" id="chatSection">
+            <div class="header">
+                <h2>💬 Web Messenger - <span id="currentUsername"></span></h2>
+                <button class="btn-small btn-danger" onclick="logout()">🚪 Выйти</button>
             </div>
             
-            <div class="main-content">
-                <div id="chat-header" class="chat-header">
-                    <h4 id="current-chat">Выберите чат</h4>
+            <div class="chat-layout">
+                <div class="sidebar">
+                    <div class="sidebar-header">
+                        <h3>💬 Чаты</h3>
+                        <button class="btn-small" onclick="showCreateGroupModal()">➕ Группа</button>
+                    </div>
+                    
+                    <div class="tabs">
+                        <div class="tab active" onclick="showChatTab('users')">👥 Люди</div>
+                        <div class="tab" onclick="showChatTab('groups')">👪 Группы</div>
+                    </div>
+                    
+                    <div class="chat-list">
+                        <div id="usersList" class="chat-tab active"></div>
+                        <div id="groupsList" class="chat-tab" style="display: none;"></div>
+                    </div>
                 </div>
                 
-                <div id="chat-messages" class="chat-messages"></div>
-                
-                <div id="message-input" class="message-input" style="display: none;">
-                    <div class="form-group">
-                        <input type="text" id="message-text" class="form-control" placeholder="Введите сообщение..." onkeypress="handleKeyPress(event)">
+                <div class="chat-main">
+                    <div class="chat-header">
+                        <h3 id="chatTitle">Выберите чат для общения</h3>
+                        <div id="chatInfo"></div>
                     </div>
-                    <button class="btn" onclick="sendMessage()">Отправить</button>
+                    
+                    <div class="messages-container" id="messagesContainer"></div>
+                    
+                    <div class="message-input-area" id="messageInputArea" style="display: none;">
+                        <div class="message-input-container">
+                            <input type="text" id="messageText" class="message-input" placeholder="Введите сообщение..." onkeypress="if(event.key === 'Enter') sendMessage()">
+                            <div class="message-actions">
+                                <button onclick="sendMessage()">📤</button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
 
     <!-- Модальное окно создания группы -->
-    <div id="create-group-modal" class="modal">
+    <div id="createGroupModal" class="modal">
         <div class="modal-content">
-            <span class="close" onclick="closeModal('create-group-modal')">&times;</span>
-            <h3>ЗАКРЫТО</h3>
-            <div class="form-group">
-                <label>Название группы:</label>
-                <input type="text" id="group-name" class="form-control">
+            <div class="modal-header">
+                <h3>Создать новую группу</h3>
+                <span class="close-modal" onclick="closeModal('createGroupModal')">&times;</span>
             </div>
-            <div class="form-group">
-                <label>Описание:</label>
-                <textarea id="group-description" class="form-control" rows="3"></textarea>
-            </div>
-            <div class="form-group">
-                <label>Участники:</label>
-                <div id="group-users-select" class="user-select"></div>
-            </div>
-            <button class="btn" onclick="createGroup()">Создать группу</button>
+            <div id="createGroupError" class="error" style="display: none;"></div>
+            <input type="text" id="groupName" placeholder="Название группы">
+            <textarea id="groupDescription" placeholder="Описание группы (необязательно)" rows="3"></textarea>
+            <h4>Выберите участников:</h4>
+            <div class="user-select-list" id="groupMembersList"></div>
+            <button onclick="createGroup()">Создать группу</button>
         </div>
     </div>
 
     <script>
+        let currentUser = null;
         let currentChat = null;
         let currentChatType = null;
-        let selectedUsers = [];
-        let currentUser = null;
-
-        // Проверка авторизации при загрузке
+        let refreshInterval = null;
+        let allUsers = [];
+        
         async function checkAuth() {
             try {
                 const response = await fetch('/api/check_auth');
@@ -996,62 +660,53 @@ with open('templates/index.html', 'w', encoding='utf-8') as f:
                 
                 if (data.success) {
                     currentUser = data.username;
-                    showMessengerInterface(data.username);
-                    loadChatLists();
+                    showChat();
+                    loadUsers();
+                    loadGroups();
                 } else {
-                    showAuthInterface();
+                    showAuth();
                 }
             } catch (error) {
-                console.error('Ошибка проверки авторизации:', error);
-                showAuthInterface();
+                showAuth();
             }
         }
-
-        // Показать интерфейс аутентификации
-        function showAuthInterface() {
-            document.getElementById('auth-container').style.display = 'block';
-            document.getElementById('messenger-container').style.display = 'none';
-        }
-
-        // Показать интерфейс мессенджера
-        function showMessengerInterface(username) {
-            document.getElementById('auth-container').style.display = 'none';
-            document.getElementById('messenger-container').style.display = 'flex';
-            document.getElementById('username-display').textContent = username;
-        }
-
-        // Переключение между вкладками входа/регистрации
+        
         function showTab(tabName) {
-            document.getElementById('login-form').style.display = tabName === 'login' ? 'block' : 'none';
-            document.getElementById('register-form').style.display = tabName === 'register' ? 'block' : 'none';
+            document.querySelectorAll('.auth-tab').forEach(tab => tab.classList.remove('active'));
+            document.querySelectorAll('.auth-form').forEach(form => form.classList.remove('active'));
             
-            const tabs = document.querySelectorAll('.auth-tab');
-            tabs.forEach(tab => tab.classList.remove('active'));
-            
-            // Активируем правильную вкладку
-            if (tabName === 'login') {
-                document.querySelector('.auth-tab:first-child').classList.add('active');
-            } else {
-                document.querySelector('.auth-tab:last-child').classList.add('active');
-            }
+            document.querySelector(`.auth-tab:nth-child(${tabName === 'login' ? 1 : 2})`).classList.add('active');
+            document.getElementById(tabName + 'Form').classList.add('active');
         }
-
-        // Вход
-        async function login() {
-            const username = document.getElementById('login-username').value;
-            const password = document.getElementById('login-password').value;
+        
+        function showAuth() {
+            document.getElementById('authSection').style.display = 'flex';
+            document.getElementById('chatSection').style.display = 'none';
+            if (refreshInterval) clearInterval(refreshInterval);
+        }
+        
+        function showChat() {
+            document.getElementById('authSection').style.display = 'none';
+            document.getElementById('chatSection').style.display = 'block';
+            document.getElementById('currentUsername').textContent = currentUser;
+        }
+        
+        function showChatTab(tabName) {
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            document.querySelectorAll('.chat-tab').forEach(tab => tab.style.display = 'none');
             
-            if (!username || !password) {
-                showError('login-error', 'Заполните все поля');
-                return;
-            }
+            document.querySelector(`.tab:nth-child(${tabName === 'users' ? 1 : 2})`).classList.add('active');
+            document.getElementById(tabName === 'users' ? 'usersList' : 'groupsList').style.display = 'block';
+        }
+        
+        async function login() {
+            const username = document.getElementById('loginUsername').value;
+            const password = document.getElementById('loginPassword').value;
             
             try {
                 const response = await fetch('/api/login', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
+                    headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ username, password })
                 });
                 
@@ -1059,151 +714,127 @@ with open('templates/index.html', 'w', encoding='utf-8') as f:
                 
                 if (data.success) {
                     currentUser = data.username;
-                    showMessengerInterface(data.username);
-                    loadChatLists();
+                    showChat();
+                    loadUsers();
+                    loadGroups();
                 } else {
-                    showError('login-error', data.error || 'Ошибка входа');
+                    showError('loginError', data.error);
                 }
             } catch (error) {
-                showError('login-error', 'Ошибка сети');
+                showError('loginError', 'Ошибка соединения');
             }
         }
-
-        // Регистрация
+        
         async function register() {
-            const username = document.getElementById('register-username').value;
-            const phone = document.getElementById('register-phone').value;
-            const password = document.getElementById('register-password').value;
-            const confirm = document.getElementById('register-confirm').value;
-            
-            if (!username || !phone || !password || !confirm) {
-                showError('register-error', 'Заполните все поля');
-                return;
-            }
-            
-            if (password !== confirm) {
-                showError('register-error', 'Пароли не совпадают');
-                return;
-            }
+            const username = document.getElementById('regUsername').value;
+            const phone = document.getElementById('regPhone').value;
+            const password = document.getElementById('regPassword').value;
+            const confirm = document.getElementById('regConfirm').value;
             
             try {
                 const response = await fetch('/api/register', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
+                    headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ username, phone, password, confirm })
                 });
                 
                 const data = await response.json();
                 
                 if (data.success) {
-                    showSuccess('register-success', data.message || 'Регистрация успешна!');
-                    document.getElementById('register-error').style.display = 'none';
-                    // Очищаем форму
-                    document.getElementById('register-username').value = '';
-                    document.getElementById('register-phone').value = '';
-                    document.getElementById('register-password').value = '';
-                    document.getElementById('register-confirm').value = '';
-                    
-                    // Переключаем на вкладку входа через 2 секунды
-                    setTimeout(() => showTab('login'), 2000);
+                    showTab('login');
+                    alert(data.message);
                 } else {
-                    showError('register-error', data.error || 'Ошибка регистрации');
+                    showError('registerError', data.error);
                 }
             } catch (error) {
-                showError('register-error', 'Ошибка сети');
+                showError('registerError', 'Ошибка соединения');
             }
         }
-
-        // Выход
+        
         async function logout() {
-            try {
-                await fetch('/api/logout');
-                currentUser = null;
-                currentChat = null;
-                showAuthInterface();
-            } catch (error) {
-                console.error('Ошибка выхода:', error);
-            }
+            await fetch('/api/logout');
+            currentUser = null;
+            currentChat = null;
+            showAuth();
         }
-
-        // Загрузка списков чатов
-        async function loadChatLists() {
-            await loadUsers();
-            await loadGroups();
-        }
-
-        // Загрузка списка пользователей
+        
         async function loadUsers() {
             try {
                 const response = await fetch('/api/users');
                 const data = await response.json();
                 
                 if (data.success) {
-                    const usersList = document.getElementById('users-list');
+                    allUsers = data.users;
+                    const usersList = document.getElementById('usersList');
                     usersList.innerHTML = '';
                     
                     data.users.forEach(user => {
-                        const li = document.createElement('li');
-                        li.className = 'chat-item';
-                        li.innerHTML = `
-                            <strong>${user.username}</strong><br>
-                            <small>${user.phone}</small>
+                        const userElement = document.createElement('div');
+                        userElement.className = 'chat-item';
+                        userElement.innerHTML = `
+                            <span class="chat-item-icon">👤</span>
+                            <div>${user.username} (${user.phone})</div>
                         `;
-                        li.onclick = () => selectChat('private', user.id, user.username);
-                        usersList.appendChild(li);
+                        userElement.onclick = () => selectChat('private', user.id, user.username);
+                        usersList.appendChild(userElement);
                     });
                 }
             } catch (error) {
-                console.error('Ошибка загрузки пользователей:', error);
+                console.error('Failed to load users:', error);
             }
         }
-
-        // Загрузка списка групп
+        
         async function loadGroups() {
             try {
                 const response = await fetch('/api/groups');
                 const data = await response.json();
                 
                 if (data.success) {
-                    const groupsList = document.getElementById('groups-list');
+                    const groupsList = document.getElementById('groupsList');
                     groupsList.innerHTML = '';
                     
                     data.groups.forEach(group => {
-                        const li = document.createElement('li');
-                        li.className = 'chat-item';
-                        li.innerHTML = `
-                            <strong>${group.name}</strong><br>
-                            <small>Участников: ${group.member_count}</small>
+                        const groupElement = document.createElement('div');
+                        groupElement.className = 'chat-item';
+                        groupElement.innerHTML = `
+                            <span class="chat-item-icon">👪</span>
+                            <div>
+                                <strong>${group.name}</strong>
+                                <div style="font-size: 0.9em; opacity: 0.7;">${group.description || 'Без описания'}</div>
+                            </div>
                         `;
-                        li.onclick = () => selectChat('group', group.id, group.name);
-                        groupsList.appendChild(li);
+                        groupElement.onclick = () => selectChat('group', group.id, group.name);
+                        groupsList.appendChild(groupElement);
                     });
                 }
             } catch (error) {
-                console.error('Ошибка загрузки групп:', error);
+                console.error('Failed to load groups:', error);
             }
         }
-
-        // Выбор чата
-        function selectChat(type, id, name) {
-            currentChat = id;
-            currentChatType = type;
+        
+        async function selectChat(chatType, chatId, chatName) {
+            currentChat = chatId;
+            currentChatType = chatType;
             
-            // Обновляем UI
-            document.getElementById('current-chat').textContent = name;
-            document.getElementById('message-input').style.display = 'block';
+            // Сбрасываем выделение
+            document.querySelectorAll('.chat-item').forEach(item => item.classList.remove('active'));
+            event.target.classList.add('active');
             
-            // Загружаем сообщения
-            loadMessages();
+            document.getElementById('chatTitle').textContent = `💬 Чат с ${chatName}`;
+            document.getElementById('messageInputArea').style.display = 'block';
             
-            // Периодическое обновление сообщений
-            clearInterval(window.messageInterval);
-            window.messageInterval = setInterval(loadMessages, 3000);
+            if (chatType === 'group') {
+                document.getElementById('chatInfo').innerHTML = `<button class="btn-small" onclick="showGroupInfo(${chatId})">ℹ️ Инфо</button>`;
+            } else {
+                document.getElementById('chatInfo').innerHTML = '';
+            }
+            
+            await loadMessages();
+            
+            if (refreshInterval) clearInterval(refreshInterval);
+            refreshInterval = setInterval(loadMessages, 2000);
         }
-
-        // Загрузка сообщений
+        
         async function loadMessages() {
             if (!currentChat) return;
             
@@ -1212,211 +843,169 @@ with open('templates/index.html', 'w', encoding='utf-8') as f:
                 const data = await response.json();
                 
                 if (data.success) {
-                    const messagesContainer = document.getElementById('chat-messages');
+                    const messagesContainer = document.getElementById('messagesContainer');
                     messagesContainer.innerHTML = '';
                     
                     data.messages.forEach(msg => {
-                        const messageDiv = document.createElement('div');
-                        messageDiv.className = `message ${msg.is_own ? 'own' : ''} fade-in`;
+                        const messageElement = document.createElement('div');
+                        messageElement.className = `message ${msg.is_own ? 'message-own' : 'message-other'} ${msg.type === 'group' ? 'message-group' : ''}`;
                         
                         const time = new Date(msg.created_at).toLocaleTimeString();
                         
-                        messageDiv.innerHTML = `
-                            <div class="message-header">
-                                <span>${msg.sender_name}</span>
-                                <span>${time}</span>
-                            </div>
-                            <div class="message-content">${msg.message_text}</div>
+                        let messageContent = '';
+                        if (msg.type === 'group' && !msg.is_own) {
+                            messageContent += `<div class="message-sender">${msg.sender_name}</div>`;
+                        }
+                        
+                        messageContent += `
+                            <div>${msg.message_text}</div>
+                            <div class="message-time">${time}</div>
                         `;
                         
-                        messagesContainer.appendChild(messageDiv);
+                        messageElement.innerHTML = messageContent;
+                        messagesContainer.appendChild(messageElement);
                     });
                     
-                    // Прокрутка вниз
                     messagesContainer.scrollTop = messagesContainer.scrollHeight;
                 }
             } catch (error) {
-                console.error('Ошибка загрузки сообщений:', error);
+                console.error('Failed to load messages:', error);
             }
         }
-
-        // Отправка сообщения
+        
         async function sendMessage() {
-            if (!currentChat || !currentChatType) return;
-            
-            const messageText = document.getElementById('message-text').value.trim();
-            if (!messageText) return;
+            const messageText = document.getElementById('messageText').value.trim();
+            if (!messageText || !currentChat) return;
             
             try {
-                const requestData = {
+                const payload = {
                     message_text: messageText,
                     type: currentChatType
                 };
                 
                 if (currentChatType === 'private') {
-                    requestData.receiver_id = currentChat;
+                    payload.receiver_id = currentChat;
                 } else {
-                    requestData.group_id = currentChat;
+                    payload.group_id = currentChat;
                 }
                 
                 const response = await fetch('/api/send_message', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(requestData)
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
                 });
                 
                 const data = await response.json();
                 
                 if (data.success) {
-                    document.getElementById('message-text').value = '';
-                    loadMessages(); // Обновляем сообщения
+                    document.getElementById('messageText').value = '';
+                    loadMessages();
                 } else {
-                    alert('Ошибка отправки: ' + data.error);
+                    alert('Ошибка: ' + data.error);
                 }
             } catch (error) {
-                console.error('Ошибка отправки сообщения:', error);
+                alert('Ошибка отправки сообщения');
             }
         }
-
-        // Отправка по Enter
-        function handleKeyPress(event) {
-            if (event.key === 'Enter') {
-                sendMessage();
-            }
+        
+        function showCreateGroupModal() {
+            const modal = document.getElementById('createGroupModal');
+            const membersList = document.getElementById('groupMembersList');
+            
+            membersList.innerHTML = '';
+            allUsers.forEach(user => {
+                const userElement = document.createElement('div');
+                userElement.className = 'user-select-item';
+                userElement.innerHTML = `
+                    <div class="checkbox-container">
+                        <input type="checkbox" id="user-${user.id}" value="${user.id}">
+                        <label for="user-${user.id}">${user.username} (${user.phone})</label>
+                    </div>
+                `;
+                membersList.appendChild(userElement);
+            });
+            
+            modal.style.display = 'block';
         }
-
-        // Показать модальное окно создания группы
-        async function showCreateGroupModal() {
-            await loadUsersForGroup();
-            document.getElementById('create-group-modal').style.display = 'block';
-        }
-
-        // Закрыть модальное окно
+        
         function closeModal(modalId) {
             document.getElementById(modalId).style.display = 'none';
-            selectedUsers = [];
         }
-
-        // Загрузка пользователей для выбора в группу
-        async function loadUsersForGroup() {
-            try {
-                const response = await fetch('/api/users');
-                const data = await response.json();
-                
-                if (data.success) {
-                    const container = document.getElementById('group-users-select');
-                    container.innerHTML = '';
-                    
-                    data.users.forEach(user => {
-                        const div = document.createElement('div');
-                        div.className = 'user-select-item';
-                        div.textContent = user.username;
-                        div.onclick = () => toggleUserSelection(user.id, div);
-                        container.appendChild(div);
-                    });
-                }
-            } catch (error) {
-                console.error('Ошибка загрузки пользователей:', error);
-            }
-        }
-
-        // Переключение выбора пользователя
-        function toggleUserSelection(userId, element) {
-            const index = selectedUsers.indexOf(userId);
-            
-            if (index === -1) {
-                selectedUsers.push(userId);
-                element.classList.add('selected');
-            } else {
-                selectedUsers.splice(index, 1);
-                element.classList.remove('selected');
-            }
-        }
-
-        // Создание группы
+        
         async function createGroup() {
-            const name = document.getElementById('group-name').value.trim();
-            const description = document.getElementById('group-description').value.trim();
+            const name = document.getElementById('groupName').value.trim();
+            const description = document.getElementById('groupDescription').value.trim();
             
             if (!name) {
-                alert('Введите название группы');
+                showError('createGroupError', 'Введите название группы');
                 return;
             }
+            
+            const memberCheckboxes = document.querySelectorAll('#groupMembersList input[type="checkbox"]:checked');
+            const memberIds = Array.from(memberCheckboxes).map(cb => parseInt(cb.value));
             
             try {
                 const response = await fetch('/api/create_group', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        name,
-                        description,
-                        member_ids: selectedUsers
-                    })
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ name, description, member_ids: memberIds })
                 });
                 
                 const data = await response.json();
                 
                 if (data.success) {
+                    closeModal('createGroupModal');
                     alert('Группа создана успешно!');
-                    closeModal('create-group-modal');
-                    loadGroups(); // Обновляем список групп
+                    loadGroups();
                     
                     // Очищаем форму
-                    document.getElementById('group-name').value = '';
-                    document.getElementById('group-description').value = '';
-                    selectedUsers = [];
+                    document.getElementById('groupName').value = '';
+                    document.getElementById('groupDescription').value = '';
+                    document.querySelectorAll('#groupMembersList input[type="checkbox"]').forEach(cb => cb.checked = false);
                 } else {
-                    alert('Ошибка создания группы: ' + data.error);
+                    showError('createGroupError', data.error);
                 }
             } catch (error) {
-                console.error('Ошибка создания группы:', error);
-                alert('Ошибка сети');
+                showError('createGroupError', 'Ошибка создания группы');
             }
         }
-
-        // Вспомогательные функции
+        
+        function showGroupInfo(groupId) {
+            alert('Информация о группе будет здесь. ID группы: ' + groupId);
+            // В реальном приложении здесь можно показать детальную информацию о группе
+        }
+        
         function showError(elementId, message) {
             const element = document.getElementById(elementId);
             element.textContent = message;
             element.style.display = 'block';
+            setTimeout(() => element.style.display = 'none', 5000);
         }
-
-        function showSuccess(elementId, message) {
-            const element = document.getElementById(elementId);
-            element.textContent = message;
-            element.style.display = 'block';
-        }
-
-        // Инициализация при загрузке
-        document.addEventListener('DOMContentLoaded', function() {
-            checkAuth();
-            
-            // Обработка нажатия вне модального окна
-            window.onclick = function(event) {
-                const modal = document.getElementById('create-group-modal');
-                if (event.target === modal) {
-                    closeModal('create-group-modal');
-                }
+        
+        // Закрытие модального окна при клике вне его
+        window.onclick = function(event) {
+            if (event.target.classList.contains('modal')) {
+                event.target.style.display = 'none';
             }
-        });
+        }
+        
+        checkAuth();
     </script>
 </body>
 </html>
-''')
+'''
+
+# Создаем файл шаблона
+with open('templates/index.html', 'w', encoding='utf-8') as f:
+    f.write(spa_html)
+
+# Инициализируем базу данных при запуске
+init_db()
 
 if __name__ == '__main__':
-    # Инициализация базы данных
-    try:
-        init_db()
-        print("🚀 Сервер запускается...")
-        print("📧 Мессенджер доступен по адресу: http://localhost:5000")
-        print("👤 Тестовые пользователи: alex, maria, ivan, sophia, maxim")
-        print("🔑 Пароль для всех: password123")
-    except Exception as e:
-        print(f"❌ Ошибка запуска: {e}")
-    
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    print("🚀 Web Messenger запущен!")
+    print("✅ База данных инициализирована")
+    print("🔑 Тестовые пользователи: alex/password123, maria/password123, ivan/password123")
+    print("👪 Тестовая группа: 'Общая группа' с участием всех пользователей")
+    app.run(host='0.0.0.0', port=port, debug=False)

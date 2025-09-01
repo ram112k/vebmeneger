@@ -77,9 +77,9 @@ def init_db():
         cursor.execute("SELECT COUNT(*) FROM users")
         if cursor.fetchone()[0] == 0:
             test_users = [
-                ('alex', '+79161234567', hash_password('password123')),
-                ('maria', '+79269876543', hash_password('password123')),
-                ('ivan', '+79031112233', hash_password('password123'))
+                ('RAM112K|CREATOR☑️', '+79161234567', hash_password('1ONE2TWO')),
+                ('AINUR|TESTER☑️', '+79269876543', hash_password('1ONE2TWO')),
+                ('DAVA|MANAGE☑️', '+79031112233', hash_password('1ONE2TWO'))
             ]
             
             for username, phone, pwd_hash in test_users:

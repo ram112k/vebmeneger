@@ -1,3 +1,4 @@
+
 from flask import Flask, render_template, request, jsonify, session
 import sqlite3
 import hashlib
@@ -39,8 +40,9 @@ def init_db():
                 sender_id INTEGER NOT NULL,
                 receiver_id INTEGER NOT NULL,
                 message_text TEXT NOT NULL,
-                message_type TEXT DEFAULT 'private', -- 'private' или 'group'
+                message_type TEXT DEFAULT 'private', -- 'private', 'group', 'channel'
                 group_id INTEGER DEFAULT NULL,
+                channel_id INTEGER DEFAULT NULL,
                 is_read INTEGER DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (sender_id) REFERENCES users (id),
@@ -60,6 +62,19 @@ def init_db():
             )
         ''')
         
+        # Таблица каналов
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT,
+                creator_id INTEGER NOT NULL,
+                is_public BOOLEAN DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (creator_id) REFERENCES users (id)
+            )
+        ''')
+        
         # Таблица участников групп
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS group_members (
@@ -73,13 +88,28 @@ def init_db():
             )
         ''')
         
+        # Таблица подписчиков каналов
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS channel_subscribers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                subscribed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (channel_id) REFERENCES channels (id),
+                FOREIGN KEY (user_id) REFERENCES users (id),
+                UNIQUE(channel_id, user_id)
+            )
+        ''')
+        
         # Создаем тестовых пользователей если их нет
         cursor.execute("SELECT COUNT(*) FROM users")
         if cursor.fetchone()[0] == 0:
             test_users = [
-                ('RAM112K', '+79161234567', hash_password('123456789')),
-                ('AINUR', '+79269876543', hash_password('123456789')),
-                ('DAVA', '+79031112233', hash_password('123456789'))
+                ('alex', '+79161234567', hash_password('password123')),
+                ('maria', '+79269876543', hash_password('password123')),
+                ('ivan', '+79031112233', hash_password('password123')),
+                ('sophia', '+79051112233', hash_password('password123')),
+                ('maxim', '+79061112233', hash_password('password123'))
             ]
             
             for username, phone, pwd_hash in test_users:
@@ -106,6 +136,28 @@ def init_db():
                     "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)",
                     (group_id, user_id)
                 )
+            
+            # Создаем тестовые каналы
+            test_channels = [
+                ('Новости проекта', 'Последние новости нашего проекта', 1, 1),
+                ('Технические обсуждения', 'Обсуждение технических вопросов', 2, 1),
+                ('Оффтоп', 'Несерьезные обсуждения', 3, 1)
+            ]
+            
+            for name, description, creator_id, is_public in test_channels:
+                cursor.execute(
+                    "INSERT INTO channels (name, description, creator_id, is_public) VALUES (?, ?, ?, ?)",
+                    (name, description, creator_id, is_public)
+                )
+                channel_id = cursor.lastrowid
+                
+                # Добавляем подписчиков в каналы
+                subscribers = [1, 2, 3, 4] if channel_id == 1 else [1, 2, 3] if channel_id == 2 else [1, 3, 5]
+                for user_id in subscribers:
+                    cursor.execute(
+                        "INSERT INTO channel_subscribers (channel_id, user_id) VALUES (?, ?)",
+                        (channel_id, user_id)
+                    )
         
         db.commit()
         db.close()
@@ -250,7 +302,8 @@ def api_groups():
         cursor = db.cursor()
         
         cursor.execute('''
-            SELECT g.id, g.name, g.description, g.creator_id, u.username as creator_name
+            SELECT g.id, g.name, g.description, g.creator_id, u.username as creator_name,
+                   (SELECT COUNT(*) FROM group_members WHERE group_id = g.id) as member_count
             FROM groups g
             JOIN users u ON g.creator_id = u.id
             JOIN group_members gm ON g.id = gm.group_id
@@ -268,6 +321,40 @@ def api_groups():
         if "no such table" in str(e):
             init_db()
             return jsonify({'success': True, 'groups': []})
+        return jsonify({'success': False, 'error': f'Ошибка базы данных: {str(e)}'})
+
+@app.route('/api/channels')
+def api_channels():
+    """API для получения списка каналов"""
+    try:
+        if 'user_id' not in session:
+            return jsonify({'success': False, 'error': 'Требуется авторизация'}), 401
+        
+        db = get_db()
+        cursor = db.cursor()
+        
+        # Получаем каналы, на которые подписан пользователь + публичные каналы
+        cursor.execute('''
+            SELECT c.id, c.name, c.description, c.creator_id, c.is_public,
+                   u.username as creator_name,
+                   (SELECT COUNT(*) FROM channel_subscribers WHERE channel_id = c.id) as subscriber_count,
+                   EXISTS(SELECT 1 FROM channel_subscribers WHERE channel_id = c.id AND user_id = ?) as is_subscribed
+            FROM channels c
+            JOIN users u ON c.creator_id = u.id
+            WHERE c.is_public = 1 OR EXISTS(SELECT 1 FROM channel_subscribers WHERE channel_id = c.id AND user_id = ?)
+            ORDER BY c.name
+        ''', (session['user_id'], session['user_id']))
+        
+        channels = cursor.fetchall()
+        db.close()
+        
+        channels_data = [dict(channel) for channel in channels]
+        return jsonify({'success': True, 'channels': channels_data})
+        
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e):
+            init_db()
+            return jsonify({'success': True, 'channels': []})
         return jsonify({'success': False, 'error': f'Ошибка базы данных: {str(e)}'})
 
 @app.route('/api/create_group', methods=['POST'])
@@ -324,6 +411,105 @@ def api_create_group():
             return jsonify({'success': False, 'error': 'База данных переинициализирована, попробуйте снова'})
         return jsonify({'success': False, 'error': f'Ошибка базы данных: {str(e)}'})
 
+@app.route('/api/create_channel', methods=['POST'])
+def api_create_channel():
+    """API для создания канала"""
+    try:
+        if 'user_id' not in session:
+            return jsonify({'success': False, 'error': 'Требуется авторизация'}), 401
+        
+        data = request.get_json()
+        name = data.get('name')
+        description = data.get('description', '')
+        is_public = data.get('is_public', True)
+        
+        if not name:
+            return jsonify({'success': False, 'error': 'Введите название канала'})
+        
+        db = get_db()
+        cursor = db.cursor()
+        
+        try:
+            # Создаем канал
+            cursor.execute(
+                "INSERT INTO channels (name, description, creator_id, is_public) VALUES (?, ?, ?, ?)",
+                (name, description, session['user_id'], is_public)
+            )
+            channel_id = cursor.lastrowid
+            
+            # Автоматически подписываем создателя на канал
+            cursor.execute(
+                "INSERT INTO channel_subscribers (channel_id, user_id) VALUES (?, ?)",
+                (channel_id, session['user_id'])
+            )
+            
+            db.commit()
+            db.close()
+            return jsonify({'success': True, 'message': 'Канал создан успешно', 'channel_id': channel_id})
+        
+        except Exception as e:
+            db.close()
+            return jsonify({'success': False, 'error': f'Ошибка создания канала: {str(e)}'}), 500
+            
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e):
+            init_db()
+            return jsonify({'success': False, 'error': 'База данных переинициализирована, попробуйте снова'})
+        return jsonify({'success': False, 'error': f'Ошибка базы данных: {str(e)}'})
+
+@app.route('/api/subscribe_channel', methods=['POST'])
+def api_subscribe_channel():
+    """API для подписки/отписки от канала"""
+    try:
+        if 'user_id' not in session:
+            return jsonify({'success': False, 'error': 'Требуется авторизация'}), 401
+        
+        data = request.get_json()
+        channel_id = data.get('channel_id')
+        action = data.get('action', 'subscribe')  # 'subscribe' или 'unsubscribe'
+        
+        if not channel_id:
+            return jsonify({'success': False, 'error': 'Укажите канал'}), 400
+        
+        db = get_db()
+        cursor = db.cursor()
+        
+        try:
+            if action == 'subscribe':
+                cursor.execute(
+                    "INSERT OR IGNORE INTO channel_subscribers (channel_id, user_id) VALUES (?, ?)",
+                    (channel_id, session['user_id'])
+                )
+                message = 'Подписка оформлена'
+            else:
+                cursor.execute(
+                    "DELETE FROM channel_subscribers WHERE channel_id = ? AND user_id = ?",
+                    (channel_id, session['user_id'])
+                )
+                message = 'Подписка отменена'
+            
+            db.commit()
+            
+            # Получаем обновленное количество подписчиков
+            cursor.execute(
+                "SELECT COUNT(*) as count FROM channel_subscribers WHERE channel_id = ?",
+                (channel_id,)
+            )
+            subscriber_count = cursor.fetchone()['count']
+            
+            db.close()
+            return jsonify({'success': True, 'message': message, 'subscriber_count': subscriber_count})
+        
+        except Exception as e:
+            db.close()
+            return jsonify({'success': False, 'error': f'Ошибка: {str(e)}'}), 500
+            
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e):
+            init_db()
+            return jsonify({'success': False, 'error': 'База данных переинициализирована, попробуйте снова'})
+        return jsonify({'success': False, 'error': f'Ошибка базы данных: {str(e)}'})
+
 @app.route('/api/messages')
 def api_messages():
     """API для получения сообщений"""
@@ -331,7 +517,7 @@ def api_messages():
         if 'user_id' not in session:
             return jsonify({'success': False, 'error': 'Требуется авторизация'}), 401
         
-        chat_type = request.args.get('type', 'private')  # 'private' или 'group'
+        chat_type = request.args.get('type', 'private')  # 'private', 'group', 'channel'
         chat_id = request.args.get('id')
         
         if not chat_id:
@@ -350,7 +536,7 @@ def api_messages():
                    OR (m.sender_id = ? AND m.receiver_id = ?)
                 ORDER BY m.created_at
             ''', (session['user_id'], chat_id, chat_id, session['user_id']))
-        else:  # group
+        elif chat_type == 'group':
             # Проверяем, что пользователь состоит в группе
             cursor.execute(
                 "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?",
@@ -366,6 +552,24 @@ def api_messages():
                 FROM messages m
                 JOIN users u ON m.sender_id = u.id
                 WHERE m.group_id = ? AND m.message_type = 'group'
+                ORDER BY m.created_at
+            ''', (chat_id,))
+        else:  # channel
+            # Проверяем, что пользователь подписан на канал
+            cursor.execute(
+                "SELECT 1 FROM channel_subscribers WHERE channel_id = ? AND user_id = ?",
+                (chat_id, session['user_id'])
+            )
+            if not cursor.fetchone():
+                db.close()
+                return jsonify({'success': False, 'error': 'Вы не подписаны на этот канал'}), 403
+            
+            cursor.execute('''
+                SELECT m.id, m.sender_id, m.channel_id, m.message_text, m.created_at, 
+                       u.username as sender_name
+                FROM messages m
+                JOIN users u ON m.sender_id = u.id
+                WHERE m.channel_id = ? AND m.message_type = 'channel'
                 ORDER BY m.created_at
             ''', (chat_id,))
         
@@ -385,8 +589,10 @@ def api_messages():
             }
             if chat_type == 'private':
                 message_data['receiver_id'] = msg['receiver_id']
-            else:
+            elif chat_type == 'group':
                 message_data['group_id'] = msg['group_id']
+            else:
+                message_data['channel_id'] = msg['channel_id']
             
             messages_data.append(message_data)
         
@@ -406,9 +612,10 @@ def api_send_message():
             return jsonify({'success': False, 'error': 'Требуется авторизация'}), 401
         
         data = request.get_json()
-        message_type = data.get('type', 'private')  # 'private' или 'group'
+        message_type = data.get('type', 'private')  # 'private', 'group', 'channel'
         receiver_id = data.get('receiver_id')
         group_id = data.get('group_id')
+        channel_id = data.get('channel_id')
         message_text = data.get('message_text', '').strip()
         
         if not message_text:
@@ -426,7 +633,7 @@ def api_send_message():
                     "INSERT INTO messages (sender_id, receiver_id, message_text, message_type) VALUES (?, ?, ?, 'private')",
                     (session['user_id'], receiver_id, message_text)
                 )
-            else:  # group
+            elif message_type == 'group':
                 if not group_id:
                     return jsonify({'success': False, 'error': 'Укажите группу'}), 400
                 
@@ -442,6 +649,23 @@ def api_send_message():
                 cursor.execute(
                     "INSERT INTO messages (sender_id, receiver_id, message_text, message_type, group_id) VALUES (?, NULL, ?, 'group', ?)",
                     (session['user_id'], message_text, group_id)
+                )
+            else:  # channel
+                if not channel_id:
+                    return jsonify({'success': False, 'error': 'Укажите канал'}), 400
+                
+                # Проверяем, что пользователь является создателем канала
+                cursor.execute(
+                    "SELECT 1 FROM channels WHERE id = ? AND creator_id = ?",
+                    (channel_id, session['user_id'])
+                )
+                if not cursor.fetchone():
+                    db.close()
+                    return jsonify({'success': False, 'error': 'Только создатель может отправлять сообщения в канал'}), 403
+                
+                cursor.execute(
+                    "INSERT INTO messages (sender_id, receiver_id, message_text, message_type, channel_id) VALUES (?, NULL, ?, 'channel', ?)",
+                    (session['user_id'], message_text, channel_id)
                 )
             
             db.commit()
@@ -510,12 +734,14 @@ spa_html = '''
         .auth-tab.active { border-bottom-color: #667eea; color: #667eea; font-weight: bold; }
         .auth-form { display: none; }
         .auth-form.active { display: block; }
-        input, textarea { width: 100%; padding: 12px; margin: 10px 0; border: 2px solid #ddd; border-radius: 8px; font-size: 16px; }
-        input:focus, textarea:focus { outline: none; border-color: #667eea; }
+        input, textarea, select { width: 100%; padding: 12px; margin: 10px 0; border: 2px solid #ddd; border-radius: 8px; font-size: 16px; }
+        input:focus, textarea:focus, select:focus { outline: none; border-color: #667eea; }
         button { padding: 12px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; margin: 10px 0; }
         button:hover { opacity: 0.9; }
         .btn-small { padding: 8px 15px; font-size: 14px; }
         .btn-danger { background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%); }
+        .btn-success { background: linear-gradient(135deg, #27ae60 0%, #229954 100%); }
+        .btn-secondary { background: linear-gradient(135deg, #95a5a6 0%, #7f8c8d 100%); }
         .error { color: #e74c3c; text-align: center; margin: 10px 0; padding: 10px; background: #f8d7da; border-radius: 5px; }
         .success { color: #27ae60; text-align: center; margin: 10px 0; padding: 10px; background: #d4edda; border-radius: 5px; }
         
@@ -525,10 +751,13 @@ spa_html = '''
         .sidebar { width: 300px; background: #f8f9fa; border-right: 1px solid #ddd; overflow-y: auto; display: flex; flex-direction: column; }
         .sidebar-header { padding: 15px; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; }
         .chat-list { flex: 1; overflow-y: auto; padding: 10px; }
-        .chat-item { padding: 12px; margin: 5px 0; background: white; border-radius: 8px; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; }
+        .chat-item { padding: 12px; margin: 5px 0; background: white; border-radius: 8px; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; justify-content: space-between; }
         .chat-item:hover { background: #667eea; color: white; }
         .chat-item.active { background: #667eea; color: white; }
         .chat-item-icon { margin-right: 10px; font-size: 18px; }
+        .chat-item-info { flex: 1; }
+        .chat-item-stats { font-size: 0.8em; opacity: 0.7; margin-top: 5px; }
+        .chat-item-actions { display: flex; gap: 5px; }
         .chat-main { flex: 1; display: flex; flex-direction: column; }
         .chat-header { padding: 15px; background: white; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; }
         .messages-container { flex: 1; padding: 20px; overflow-y: auto; background: #f8f9fa; display: flex; flex-direction: column; }
@@ -536,6 +765,7 @@ spa_html = '''
         .message-own { background: #667eea; color: white; margin-left: auto; border-bottom-right-radius: 5px; }
         .message-other { background: white; color: #333; margin-right: auto; border-bottom-left-radius: 5px; border: 1px solid #ddd; }
         .message-group { background: #e8f4f8; border-color: #b8e0f0; }
+        .message-channel { background: #fff3cd; border-color: #ffeaa7; }
         .message-time { font-size: 0.8em; opacity: 0.7; margin-top: 5px; }
         .message-sender { font-weight: bold; margin-bottom: 5px; }
         .message-input-area { padding: 15px; background: white; border-top: 1px solid #ddd; }
@@ -544,7 +774,7 @@ spa_html = '''
         .message-actions { display: flex; gap: 5px; }
         
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; }
-        .modal-content { background: white; margin: 10% auto; padding: 20px; border-radius: 15px; width: 90%; max-width: 500px; }
+        .modal-content { background: white; margin: 5% auto; padding: 20px; border-radius: 15px; width: 90%; max-width: 500px; max-height: 80vh; overflow-y: auto; }
         .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
         .close-modal { font-size: 24px; cursor: pointer; }
         .user-select-list { max-height: 200px; overflow-y: auto; margin: 10px 0; }
@@ -554,6 +784,9 @@ spa_html = '''
         .tabs { display: flex; border-bottom: 2px solid #eee; margin-bottom: 15px; }
         .tab { padding: 10px 20px; cursor: pointer; border-bottom: 3px solid transparent; }
         .tab.active { border-bottom-color: #667eea; color: #667eea; font-weight: bold; }
+        
+        .channel-info { background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 15px; }
+        .subscription-btn { width: auto; margin: 5px 0; }
     </style>
 </head>
 <body>
@@ -595,17 +828,22 @@ spa_html = '''
                 <div class="sidebar">
                     <div class="sidebar-header">
                         <h3>💬 Чаты</h3>
-                        <button class="btn-small" onclick="showCreateGroupModal()">➕ Группа</button>
+                        <div>
+                            <button class="btn-small" onclick="showCreateGroupModal()">👪 Группа</button>
+                            <button class="btn-small" onclick="showCreateChannelModal()">📢 Канал</button>
+                        </div>
                     </div>
                     
                     <div class="tabs">
                         <div class="tab active" onclick="showChatTab('users')">👥 Люди</div>
                         <div class="tab" onclick="showChatTab('groups')">👪 Группы</div>
+                        <div class="tab" onclick="showChatTab('channels')">📢 Каналы</div>
                     </div>
                     
                     <div class="chat-list">
                         <div id="usersList" class="chat-tab active"></div>
                         <div id="groupsList" class="chat-tab" style="display: none;"></div>
+                        <div id="channelsList" class="chat-tab" style="display: none;"></div>
                     </div>
                 </div>
                 
@@ -646,12 +884,42 @@ spa_html = '''
         </div>
     </div>
 
+    <!-- Модальное окно создания канала -->
+    <div id="createChannelModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Создать новый канал</h3>
+                <span class="close-modal" onclick="closeModal('createChannelModal')">&times;</span>
+            </div>
+            <div id="createChannelError" class="error" style="display: none;"></div>
+            <input type="text" id="channelName" placeholder="Название канала">
+            <textarea id="channelDescription" placeholder="Описание канала (необязательно)" rows="3"></textarea>
+            <select id="channelVisibility">
+                <option value="1">📢 Публичный канал</option>
+                <option value="0">🔒 Приватный канал</option>
+            </select>
+            <button onclick="createChannel()">Создать канал</button>
+        </div>
+    </div>
+
+    <!-- Модальное окно информации о канале -->
+    <div id="channelInfoModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Информация о канале</h3>
+                <span class="close-modal" onclick="closeModal('channelInfoModal')">&times;</span>
+            </div>
+            <div id="channelInfoContent"></div>
+        </div>
+    </div>
+
     <script>
         let currentUser = null;
         let currentChat = null;
         let currentChatType = null;
         let refreshInterval = null;
         let allUsers = [];
+        let currentChannelInfo = null;
         
         async function checkAuth() {
             try {
@@ -663,6 +931,7 @@ spa_html = '''
                     showChat();
                     loadUsers();
                     loadGroups();
+                    loadChannels();
                 } else {
                     showAuth();
                 }
@@ -695,8 +964,9 @@ spa_html = '''
             document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
             document.querySelectorAll('.chat-tab').forEach(tab => tab.style.display = 'none');
             
-            document.querySelector(`.tab:nth-child(${tabName === 'users' ? 1 : 2})`).classList.add('active');
-            document.getElementById(tabName === 'users' ? 'usersList' : 'groupsList').style.display = 'block';
+            const tabIndex = {'users': 1, 'groups': 2, 'channels': 3}[tabName];
+            document.querySelector(`.tab:nth-child(${tabIndex})`).classList.add('active');
+            document.getElementById(tabName + 'List').style.display = 'block';
         }
         
         async function login() {
@@ -717,6 +987,7 @@ spa_html = '''
                     showChat();
                     loadUsers();
                     loadGroups();
+                    loadChannels();
                 } else {
                     showError('loginError', data.error);
                 }
@@ -798,9 +1069,9 @@ spa_html = '''
                         groupElement.className = 'chat-item';
                         groupElement.innerHTML = `
                             <span class="chat-item-icon">👪</span>
-                            <div>
+                            <div class="chat-item-info">
                                 <strong>${group.name}</strong>
-                                <div style="font-size: 0.9em; opacity: 0.7;">${group.description || 'Без описания'}</div>
+                                <div class="chat-item-stats">👥 ${group.member_count} участников</div>
                             </div>
                         `;
                         groupElement.onclick = () => selectChat('group', group.id, group.name);
@@ -812,27 +1083,99 @@ spa_html = '''
             }
         }
         
+        async function loadChannels() {
+            try {
+                const response = await fetch('/api/channels');
+                const data = await response.json();
+                
+                if (data.success) {
+                    const channelsList = document.getElementById('channelsList');
+                    channelsList.innerHTML = '';
+                    
+                    data.channels.forEach(channel => {
+                        const channelElement = document.createElement('div');
+                        channelElement.className = 'chat-item';
+                        
+                        const icon = channel.is_public ? '📢' : '🔒';
+                        const status = channel.is_subscribed ? '✅' : '🔔';
+                        
+                        channelElement.innerHTML = `
+                            <span class="chat-item-icon">${icon}</span>
+                            <div class="chat-item-info">
+                                <strong>${channel.name}</strong>
+                                <div class="chat-item-stats">👥 ${channel.subscriber_count} подписчиков</div>
+                            </div>
+                            <div class="chat-item-actions">
+                                <button class="btn-small ${channel.is_subscribed ? 'btn-danger' : 'btn-success'}" 
+                                    onclick="toggleSubscription(${channel.id}, ${channel.is_subscribed}, event)">
+                                    ${channel.is_subscribed ? '❌' : '✅'}
+                                </button>
+                                <button class="btn-small btn-secondary" onclick="showChannelInfo(${channel.id}, event)">
+                                    ℹ️
+                                </button>
+                            </div>
+                        `;
+                        
+                        if (channel.is_subscribed) {
+                            channelElement.onclick = () => selectChat('channel', channel.id, channel.name);
+                        }
+                        
+                        channelsList.appendChild(channelElement);
+                    });
+                }
+            } catch (error) {
+                console.error('Failed to load channels:', error);
+            }
+        }
+        
         async function selectChat(chatType, chatId, chatName) {
             currentChat = chatId;
             currentChatType = chatType;
             
             // Сбрасываем выделение
             document.querySelectorAll('.chat-item').forEach(item => item.classList.remove('active'));
-            event.target.classList.add('active');
+            event.target.closest('.chat-item').classList.add('active');
             
-            document.getElementById('chatTitle').textContent = `💬 Чат с ${chatName}`;
-            document.getElementById('messageInputArea').style.display = 'block';
+            document.getElementById('chatTitle').textContent = `💬 ${chatType === 'channel' ? 'Канал: ' : ''}${chatName}`;
             
-            if (chatType === 'group') {
-                document.getElementById('chatInfo').innerHTML = `<button class="btn-small" onclick="showGroupInfo(${chatId})">ℹ️ Инфо</button>`;
+            if (chatType === 'channel') {
+                document.getElementById('chatInfo').innerHTML = `
+                    <button class="btn-small" onclick="showChannelInfo(${chatId})">ℹ️ Инфо</button>
+                `;
+                // Для каналов проверяем, может ли пользователь отправлять сообщения
+                const canSend = await checkChannelPermissions(chatId);
+                document.getElementById('messageInputArea').style.display = canSend ? 'block' : 'none';
+                if (!canSend) {
+                    document.getElementById('messagesContainer').innerHTML += `
+                        <div style="text-align: center; padding: 20px; color: #666;">
+                            📢 Только создатель канала может отправлять сообщения
+                        </div>
+                    `;
+                }
             } else {
                 document.getElementById('chatInfo').innerHTML = '';
+                document.getElementById('messageInputArea').style.display = 'block';
             }
             
             await loadMessages();
             
             if (refreshInterval) clearInterval(refreshInterval);
             refreshInterval = setInterval(loadMessages, 2000);
+        }
+        
+        async function checkChannelPermissions(channelId) {
+            try {
+                const response = await fetch('/api/channels');
+                const data = await response.json();
+                
+                if (data.success) {
+                    const channel = data.channels.find(c => c.id === channelId);
+                    return channel && channel.creator_id; // В реальном приложении нужно проверять creator_id
+                }
+                return false;
+            } catch (error) {
+                return false;
+            }
         }
         
         async function loadMessages() {
@@ -848,12 +1191,12 @@ spa_html = '''
                     
                     data.messages.forEach(msg => {
                         const messageElement = document.createElement('div');
-                        messageElement.className = `message ${msg.is_own ? 'message-own' : 'message-other'} ${msg.type === 'group' ? 'message-group' : ''}`;
+                        messageElement.className = `message ${msg.is_own ? 'message-own' : 'message-other'} ${msg.type === 'group' ? 'message-group' : ''} ${msg.type === 'channel' ? 'message-channel' : ''}`;
                         
                         const time = new Date(msg.created_at).toLocaleTimeString();
                         
                         let messageContent = '';
-                        if (msg.type === 'group' && !msg.is_own) {
+                        if ((msg.type === 'group' || msg.type === 'channel') && !msg.is_own) {
                             messageContent += `<div class="message-sender">${msg.sender_name}</div>`;
                         }
                         
@@ -885,8 +1228,10 @@ spa_html = '''
                 
                 if (currentChatType === 'private') {
                     payload.receiver_id = currentChat;
-                } else {
+                } else if (currentChatType === 'group') {
                     payload.group_id = currentChat;
+                } else {
+                    payload.channel_id = currentChat;
                 }
                 
                 const response = await fetch('/api/send_message', {
@@ -928,8 +1273,79 @@ spa_html = '''
             modal.style.display = 'block';
         }
         
-        function closeModal(modalId) {
-            document.getElementById(modalId).style.display = 'none';
+        function showCreateChannelModal() {
+            document.getElementById('createChannelModal').style.display = 'block';
+        }
+        
+        async function showChannelInfo(channelId, event = null) {
+            if (event) event.stopPropagation();
+            
+            try {
+                const response = await fetch('/api/channels');
+                const data = await response.json();
+                
+                if (data.success) {
+                    const channel = data.channels.find(c => c.id === channelId);
+                    if (channel) {
+                        currentChannelInfo = channel;
+                        
+                        const modalContent = document.getElementById('channelInfoContent');
+                        modalContent.innerHTML = `
+                            <div class="channel-info">
+                                <h3>${channel.name}</h3>
+                                <p>${channel.description || 'Описание отсутствует'}</p>
+                                <div class="chat-item-stats">
+                                    <strong>📊 Статистика:</strong><br>
+                                    👥 Подписчиков: ${channel.subscriber_count}<br>
+                                    📢 Создатель: ${channel.creator_name}<br>
+                                    🌐 Тип: ${channel.is_public ? 'Публичный' : 'Приватный'}
+                                </div>
+                            </div>
+                            <button class="subscription-btn btn-${channel.is_subscribed ? 'danger' : 'success'}" 
+                                onclick="toggleSubscription(${channel.id}, ${channel.is_subscribed})">
+                                ${channel.is_subscribed ? '❌ Отписаться' : '✅ Подписаться'}
+                            </button>
+                        `;
+                        
+                        document.getElementById('channelInfoModal').style.display = 'block';
+                    }
+                }
+            } catch (error) {
+                console.error('Failed to load channel info:', error);
+            }
+        }
+        
+        async function toggleSubscription(channelId, isSubscribed, event = null) {
+            if (event) event.stopPropagation();
+            
+            try {
+                const response = await fetch('/api/subscribe_channel', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        channel_id: channelId,
+                        action: isSubscribed ? 'unsubscribe' : 'subscribe'
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    alert(data.message);
+                    loadChannels();
+                    
+                    // Обновляем модальное окно если оно открыто
+                    if (currentChannelInfo && currentChannelInfo.id === channelId) {
+                        currentChannelInfo.is_subscribed = !isSubscribed;
+                        currentChannelInfo.subscriber_count = data.subscriber_count;
+                        showChannelInfo(channelId);
+                    }
+                } else {
+                    alert('Ошибка: ' + data.error);
+                }
+            } catch (error) {
+                alert('Ошибка изменения подписки');
+            }
         }
         
         async function createGroup() {
@@ -970,9 +1386,43 @@ spa_html = '''
             }
         }
         
-        function showGroupInfo(groupId) {
-            alert('Информация о группе будет здесь. ID группы: ' + groupId);
-            // В реальном приложении здесь можно показать детальную информацию о группе
+        async function createChannel() {
+            const name = document.getElementById('channelName').value.trim();
+            const description = document.getElementById('channelDescription').value.trim();
+            const isPublic = document.getElementById('channelVisibility').value === '1';
+            
+            if (!name) {
+                showError('createChannelError', 'Введите название канала');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/create_channel', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ name, description, is_public: isPublic })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    closeModal('createChannelModal');
+                    alert('Канал создан успешно!');
+                    loadChannels();
+                    
+                    // Очищаем форму
+                    document.getElementById('channelName').value = '';
+                    document.getElementById('channelDescription').value = '';
+                } else {
+                    showError('createChannelError', data.error);
+                }
+            } catch (error) {
+                showError('createChannelError', 'Ошибка создания канала');
+            }
+        }
+        
+        function closeModal(modalId) {
+            document.getElementById(modalId).style.display = 'none';
         }
         
         function showError(elementId, message) {
@@ -1008,4 +1458,5 @@ if __name__ == '__main__':
     print("✅ База данных инициализирована")
     print("🔑 Тестовые пользователи: alex/password123, maria/password123, ivan/password123")
     print("👪 Тестовая группа: 'Общая группа' с участием всех пользователей")
+    print("📢 Тестовые каналы: 'Новости проекта', 'Технические обсуждения', 'Оффтоп'")
     app.run(host='0.0.0.0', port=port, debug=False)

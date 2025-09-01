@@ -1,8 +1,3 @@
-Я добавлю функционал администрирования каналов, чтобы создатель мог назначать администраторов, которые также смогут писать в канал.
-
-Вот модифицированный код:
-
-```python
 from flask import Flask, render_template, request, jsonify, session
 import sqlite3
 import hashlib

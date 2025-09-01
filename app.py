@@ -965,7 +965,7 @@ with open('templates/index.html', 'w', encoding='utf-8') as f:
     <div id="create-group-modal" class="modal">
         <div class="modal-content">
             <span class="close" onclick="closeModal('create-group-modal')">&times;</span>
-            <h3>Создать группу</h3>
+            <h3>ЗАКРЫТО</h3>
             <div class="form-group">
                 <label>Название группы:</label>
                 <input type="text" id="group-name" class="form-control">

@@ -3,7 +3,6 @@ import sqlite3
 import hashlib
 from datetime import datetime
 import os
-import json
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-12345')
@@ -39,37 +38,10 @@ def init_db():
                 sender_id INTEGER NOT NULL,
                 receiver_id INTEGER NOT NULL,
                 message_text TEXT NOT NULL,
-                message_type TEXT DEFAULT 'private', -- 'private' или 'group'
-                group_id INTEGER DEFAULT NULL,
                 is_read INTEGER DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (sender_id) REFERENCES users (id),
                 FOREIGN KEY (receiver_id) REFERENCES users (id)
-            )
-        ''')
-        
-        # Таблица групп
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS groups (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                description TEXT,
-                creator_id INTEGER NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (creator_id) REFERENCES users (id)
-            )
-        ''')
-        
-        # Таблица участников групп
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS group_members (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                group_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (group_id) REFERENCES groups (id),
-                FOREIGN KEY (user_id) REFERENCES users (id),
-                UNIQUE(group_id, user_id)
             )
         ''')
         
@@ -92,20 +64,6 @@ def init_db():
                 except sqlite3.IntegrityError:
                     print(f"Пользователь {username} уже существует")
                     pass
-            
-            # Создаем тестовую группу
-            cursor.execute(
-                "INSERT INTO groups (name, description, creator_id) VALUES (?, ?, ?)",
-                ('Общая группа', 'Группа для обсуждения общих вопросов', 1)
-            )
-            group_id = cursor.lastrowid
-            
-            # Добавляем всех пользователей в группу
-            for user_id in [1, 2, 3]:
-                cursor.execute(
-                    "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)",
-                    (group_id, user_id)
-                )
         
         db.commit()
         db.close()
@@ -239,91 +197,6 @@ def api_users():
             return jsonify({'success': True, 'users': []})
         return jsonify({'success': False, 'error': f'Ошибка базы данных: {str(e)}'})
 
-@app.route('/api/groups')
-def api_groups():
-    """API для получения списка групп"""
-    try:
-        if 'user_id' not in session:
-            return jsonify({'success': False, 'error': 'Требуется авторизация'}), 401
-        
-        db = get_db()
-        cursor = db.cursor()
-        
-        cursor.execute('''
-            SELECT g.id, g.name, g.description, g.creator_id, u.username as creator_name
-            FROM groups g
-            JOIN users u ON g.creator_id = u.id
-            JOIN group_members gm ON g.id = gm.group_id
-            WHERE gm.user_id = ?
-            ORDER BY g.name
-        ''', (session['user_id'],))
-        
-        groups = cursor.fetchall()
-        db.close()
-        
-        groups_data = [dict(group) for group in groups]
-        return jsonify({'success': True, 'groups': groups_data})
-        
-    except sqlite3.OperationalError as e:
-        if "no such table" in str(e):
-            init_db()
-            return jsonify({'success': True, 'groups': []})
-        return jsonify({'success': False, 'error': f'Ошибка базы данных: {str(e)}'})
-
-@app.route('/api/create_group', methods=['POST'])
-def api_create_group():
-    """API для создания группы"""
-    try:
-        if 'user_id' not in session:
-            return jsonify({'success': False, 'error': 'Требуется авторизация'}), 401
-        
-        data = request.get_json()
-        name = data.get('name')
-        description = data.get('description', '')
-        member_ids = data.get('member_ids', [])
-        
-        if not name:
-            return jsonify({'success': False, 'error': 'Введите название группы'})
-        
-        db = get_db()
-        cursor = db.cursor()
-        
-        try:
-            # Создаем группу
-            cursor.execute(
-                "INSERT INTO groups (name, description, creator_id) VALUES (?, ?, ?)",
-                (name, description, session['user_id'])
-            )
-            group_id = cursor.lastrowid
-            
-            # Добавляем создателя в группу
-            cursor.execute(
-                "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)",
-                (group_id, session['user_id'])
-            )
-            
-            # Добавляем выбранных участников
-            for user_id in member_ids:
-                if user_id != session['user_id']:  # Не добавляем себя повторно
-                    cursor.execute(
-                        "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)",
-                        (group_id, user_id)
-                    )
-            
-            db.commit()
-            db.close()
-            return jsonify({'success': True, 'message': 'Группа создана успешно', 'group_id': group_id})
-        
-        except Exception as e:
-            db.close()
-            return jsonify({'success': False, 'error': f'Ошибка создания группы: {str(e)}'}), 500
-            
-    except sqlite3.OperationalError as e:
-        if "no such table" in str(e):
-            init_db()
-            return jsonify({'success': False, 'error': 'База данных переинициализирована, попробуйте снова'})
-        return jsonify({'success': False, 'error': f'Ошибка базы данных: {str(e)}'})
-
 @app.route('/api/messages')
 def api_messages():
     """API для получения сообщений"""
@@ -331,64 +204,35 @@ def api_messages():
         if 'user_id' not in session:
             return jsonify({'success': False, 'error': 'Требуется авторизация'}), 401
         
-        chat_type = request.args.get('type', 'private')  # 'private' или 'group'
-        chat_id = request.args.get('id')
-        
-        if not chat_id:
-            return jsonify({'success': False, 'error': 'Укажите ID чата'}), 400
+        other_user_id = request.args.get('user_id')
+        if not other_user_id:
+            return jsonify({'success': False, 'error': 'Укажите user_id'}), 400
         
         db = get_db()
         cursor = db.cursor()
         
-        if chat_type == 'private':
-            cursor.execute('''
-                SELECT m.id, m.sender_id, m.receiver_id, m.message_text, m.created_at, 
-                       u.username as sender_name
-                FROM messages m
-                JOIN users u ON m.sender_id = u.id
-                WHERE (m.sender_id = ? AND m.receiver_id = ?) 
-                   OR (m.sender_id = ? AND m.receiver_id = ?)
-                ORDER BY m.created_at
-            ''', (session['user_id'], chat_id, chat_id, session['user_id']))
-        else:  # group
-            # Проверяем, что пользователь состоит в группе
-            cursor.execute(
-                "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?",
-                (chat_id, session['user_id'])
-            )
-            if not cursor.fetchone():
-                db.close()
-                return jsonify({'success': False, 'error': 'Вы не состоите в этой группе'}), 403
-            
-            cursor.execute('''
-                SELECT m.id, m.sender_id, m.group_id, m.message_text, m.created_at, 
-                       u.username as sender_name
-                FROM messages m
-                JOIN users u ON m.sender_id = u.id
-                WHERE m.group_id = ? AND m.message_type = 'group'
-                ORDER BY m.created_at
-            ''', (chat_id,))
+        cursor.execute('''
+            SELECT m.id, m.sender_id, m.receiver_id, m.message_text, m.created_at, 
+                   u.username as sender_name
+            FROM messages m
+            JOIN users u ON m.sender_id = u.id
+            WHERE (m.sender_id = ? AND m.receiver_id = ?) 
+               OR (m.sender_id = ? AND m.receiver_id = ?)
+            ORDER BY m.created_at
+        ''', (session['user_id'], other_user_id, other_user_id, session['user_id']))
         
         messages = cursor.fetchall()
         db.close()
         
-        messages_data = []
-        for msg in messages:
-            message_data = {
-                'id': msg['id'],
-                'sender_id': msg['sender_id'],
-                'message_text': msg['message_text'],
-                'created_at': msg['created_at'],
-                'sender_name': msg['sender_name'],
-                'is_own': msg['sender_id'] == session['user_id'],
-                'type': chat_type
-            }
-            if chat_type == 'private':
-                message_data['receiver_id'] = msg['receiver_id']
-            else:
-                message_data['group_id'] = msg['group_id']
-            
-            messages_data.append(message_data)
+        messages_data = [{
+            'id': msg['id'],
+            'sender_id': msg['sender_id'],
+            'receiver_id': msg['receiver_id'],
+            'message_text': msg['message_text'],
+            'created_at': msg['created_at'],
+            'sender_name': msg['sender_name'],
+            'is_own': msg['sender_id'] == session['user_id']
+        } for msg in messages]
         
         return jsonify({'success': True, 'messages': messages_data})
         
@@ -406,44 +250,20 @@ def api_send_message():
             return jsonify({'success': False, 'error': 'Требуется авторизация'}), 401
         
         data = request.get_json()
-        message_type = data.get('type', 'private')  # 'private' или 'group'
         receiver_id = data.get('receiver_id')
-        group_id = data.get('group_id')
         message_text = data.get('message_text', '').strip()
         
-        if not message_text:
-            return jsonify({'success': False, 'error': 'Введите текст сообщения'}), 400
+        if not receiver_id or not message_text:
+            return jsonify({'success': False, 'error': 'Заполните все поля'}), 400
         
         db = get_db()
         cursor = db.cursor()
         
         try:
-            if message_type == 'private':
-                if not receiver_id:
-                    return jsonify({'success': False, 'error': 'Укажите получателя'}), 400
-                
-                cursor.execute(
-                    "INSERT INTO messages (sender_id, receiver_id, message_text, message_type) VALUES (?, ?, ?, 'private')",
-                    (session['user_id'], receiver_id, message_text)
-                )
-            else:  # group
-                if not group_id:
-                    return jsonify({'success': False, 'error': 'Укажите группу'}), 400
-                
-                # Проверяем, что пользователь состоит в группе
-                cursor.execute(
-                    "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?",
-                    (group_id, session['user_id'])
-                )
-                if not cursor.fetchone():
-                    db.close()
-                    return jsonify({'success': False, 'error': 'Вы не состоите в этой группе'}), 403
-                
-                cursor.execute(
-                    "INSERT INTO messages (sender_id, receiver_id, message_text, message_type, group_id) VALUES (?, NULL, ?, 'group', ?)",
-                    (session['user_id'], message_text, group_id)
-                )
-            
+            cursor.execute(
+                "INSERT INTO messages (sender_id, receiver_id, message_text) VALUES (?, ?, ?)",
+                (session['user_id'], receiver_id, message_text)
+            )
             db.commit()
             db.close()
             return jsonify({'success': True, 'message': 'Сообщение отправлено'})
@@ -510,50 +330,31 @@ spa_html = '''
         .auth-tab.active { border-bottom-color: #667eea; color: #667eea; font-weight: bold; }
         .auth-form { display: none; }
         .auth-form.active { display: block; }
-        input, textarea { width: 100%; padding: 12px; margin: 10px 0; border: 2px solid #ddd; border-radius: 8px; font-size: 16px; }
-        input:focus, textarea:focus { outline: none; border-color: #667eea; }
-        button { padding: 12px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; margin: 10px 0; }
+        input { width: 100%; padding: 12px; margin: 10px 0; border: 2px solid #ddd; border-radius: 8px; font-size: 16px; }
+        input:focus { outline: none; border-color: #667eea; }
+        button { width: 100%; padding: 12px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; margin: 10px 0; }
         button:hover { opacity: 0.9; }
-        .btn-small { padding: 8px 15px; font-size: 14px; }
-        .btn-danger { background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%); }
         .error { color: #e74c3c; text-align: center; margin: 10px 0; padding: 10px; background: #f8d7da; border-radius: 5px; }
         .success { color: #27ae60; text-align: center; margin: 10px 0; padding: 10px; background: #d4edda; border-radius: 5px; }
         
         .chat-container { display: none; background: white; border-radius: 15px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.2); height: 80vh; }
         .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; }
         .chat-layout { display: flex; height: calc(100% - 60px); }
-        .sidebar { width: 300px; background: #f8f9fa; border-right: 1px solid #ddd; overflow-y: auto; display: flex; flex-direction: column; }
-        .sidebar-header { padding: 15px; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; }
-        .chat-list { flex: 1; overflow-y: auto; padding: 10px; }
-        .chat-item { padding: 12px; margin: 5px 0; background: white; border-radius: 8px; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; }
-        .chat-item:hover { background: #667eea; color: white; }
-        .chat-item.active { background: #667eea; color: white; }
-        .chat-item-icon { margin-right: 10px; font-size: 18px; }
+        .sidebar { width: 250px; background: #f8f9fa; border-right: 1px solid #ddd; overflow-y: auto; }
+        .sidebar-header { padding: 15px; border-bottom: 1px solid #ddd; }
+        .user-list { padding: 10px; }
+        .user-item { padding: 10px; margin: 5px 0; background: white; border-radius: 5px; cursor: pointer; transition: all 0.3s; }
+        .user-item:hover { background: #667eea; color: white; }
+        .user-item.active { background: #667eea; color: white; }
         .chat-main { flex: 1; display: flex; flex-direction: column; }
-        .chat-header { padding: 15px; background: white; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; }
-        .messages-container { flex: 1; padding: 20px; overflow-y: auto; background: #f8f9fa; display: flex; flex-direction: column; }
-        .message { max-width: 70%; margin: 10px 0; padding: 12px; border-radius: 15px; position: relative; }
+        .chat-header { padding: 15px; background: white; border-bottom: 1px solid #ddd; }
+        .messages-container { flex: 1; padding: 20px; overflow-y: auto; background: #f8f9fa; }
+        .message { max-width: 70%; margin: 10px 0; padding: 12px; border-radius: 15px; }
         .message-own { background: #667eea; color: white; margin-left: auto; border-bottom-right-radius: 5px; }
         .message-other { background: white; color: #333; margin-right: auto; border-bottom-left-radius: 5px; border: 1px solid #ddd; }
-        .message-group { background: #e8f4f8; border-color: #b8e0f0; }
-        .message-time { font-size: 0.8em; opacity: 0.7; margin-top: 5px; }
-        .message-sender { font-weight: bold; margin-bottom: 5px; }
-        .message-input-area { padding: 15px; background: white; border-top: 1px solid #ddd; }
-        .message-input-container { display: flex; gap: 10px; }
-        .message-input { flex: 1; }
-        .message-actions { display: flex; gap: 5px; }
-        
-        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; }
-        .modal-content { background: white; margin: 10% auto; padding: 20px; border-radius: 15px; width: 90%; max-width: 500px; }
-        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-        .close-modal { font-size: 24px; cursor: pointer; }
-        .user-select-list { max-height: 200px; overflow-y: auto; margin: 10px 0; }
-        .user-select-item { padding: 10px; border: 1px solid #ddd; border-radius: 5px; margin: 5px 0; }
-        .checkbox-container { display: flex; align-items: center; gap: 10px; }
-        
-        .tabs { display: flex; border-bottom: 2px solid #eee; margin-bottom: 15px; }
-        .tab { padding: 10px 20px; cursor: pointer; border-bottom: 3px solid transparent; }
-        .tab.active { border-bottom-color: #667eea; color: #667eea; font-weight: bold; }
+        .message-input { display: flex; padding: 15px; background: white; border-top: 1px solid #ddd; }
+        .message-input input { flex: 1; margin-right: 10px; }
+        .logout-btn { background: #e74c3c; padding: 8px 15px; border-radius: 5px; }
     </style>
 </head>
 <body>
@@ -588,70 +389,37 @@ spa_html = '''
         <div class="chat-container" id="chatSection">
             <div class="header">
                 <h2>💬 Web Messenger - <span id="currentUsername"></span></h2>
-                <button class="btn-small btn-danger" onclick="logout()">🚪 Выйти</button>
+                <button class="logout-btn" onclick="logout()">🚪 Выйти</button>
             </div>
             
             <div class="chat-layout">
                 <div class="sidebar">
                     <div class="sidebar-header">
-                        <h3>💬 Чаты</h3>
-                        <button class="btn-small" onclick="showCreateGroupModal()">➕ Группа</button>
+                        <h3>👥 Пользователи</h3>
                     </div>
-                    
-                    <div class="tabs">
-                        <div class="tab active" onclick="showChatTab('users')">👥 Люди</div>
-                        <div class="tab" onclick="showChatTab('groups')">👪 Группы</div>
-                    </div>
-                    
-                    <div class="chat-list">
-                        <div id="usersList" class="chat-tab active"></div>
-                        <div id="groupsList" class="chat-tab" style="display: none;"></div>
-                    </div>
+                    <div class="user-list" id="userList"></div>
                 </div>
                 
                 <div class="chat-main">
                     <div class="chat-header">
-                        <h3 id="chatTitle">Выберите чат для общения</h3>
-                        <div id="chatInfo"></div>
+                        <h3 id="chatTitle">Выберите пользователя для чата</h3>
                     </div>
                     
                     <div class="messages-container" id="messagesContainer"></div>
                     
-                    <div class="message-input-area" id="messageInputArea" style="display: none;">
-                        <div class="message-input-container">
-                            <input type="text" id="messageText" class="message-input" placeholder="Введите сообщение..." onkeypress="if(event.key === 'Enter') sendMessage()">
-                            <div class="message-actions">
-                                <button onclick="sendMessage()">📤</button>
-                            </div>
-                        </div>
+                    <div class="message-input" id="messageInput" style="display: none;">
+                        <input type="text" id="messageText" placeholder="Введите сообщение..." onkeypress="if(event.key === 'Enter') sendMessage()">
+                        <button onclick="sendMessage()">📤 Отправить</button>
                     </div>
                 </div>
             </div>
-        </div>
-    </div>
-
-    <!-- Модальное окно создания группы -->
-    <div id="createGroupModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>Создать новую группу</h3>
-                <span class="close-modal" onclick="closeModal('createGroupModal')">&times;</span>
-            </div>
-            <div id="createGroupError" class="error" style="display: none;"></div>
-            <input type="text" id="groupName" placeholder="Название группы">
-            <textarea id="groupDescription" placeholder="Описание группы (необязательно)" rows="3"></textarea>
-            <h4>Выберите участников:</h4>
-            <div class="user-select-list" id="groupMembersList"></div>
-            <button onclick="createGroup()">Создать группу</button>
         </div>
     </div>
 
     <script>
         let currentUser = null;
-        let currentChat = null;
-        let currentChatType = null;
+        let selectedUserId = null;
         let refreshInterval = null;
-        let allUsers = [];
         
         async function checkAuth() {
             try {
@@ -662,7 +430,6 @@ spa_html = '''
                     currentUser = data.username;
                     showChat();
                     loadUsers();
-                    loadGroups();
                 } else {
                     showAuth();
                 }
@@ -691,14 +458,6 @@ spa_html = '''
             document.getElementById('currentUsername').textContent = currentUser;
         }
         
-        function showChatTab(tabName) {
-            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
-            document.querySelectorAll('.chat-tab').forEach(tab => tab.style.display = 'none');
-            
-            document.querySelector(`.tab:nth-child(${tabName === 'users' ? 1 : 2})`).classList.add('active');
-            document.getElementById(tabName === 'users' ? 'usersList' : 'groupsList').style.display = 'block';
-        }
-        
         async function login() {
             const username = document.getElementById('loginUsername').value;
             const password = document.getElementById('loginPassword').value;
@@ -716,7 +475,6 @@ spa_html = '''
                     currentUser = data.username;
                     showChat();
                     loadUsers();
-                    loadGroups();
                 } else {
                     showError('loginError', data.error);
                 }
@@ -754,7 +512,7 @@ spa_html = '''
         async function logout() {
             await fetch('/api/logout');
             currentUser = null;
-            currentChat = null;
+            selectedUserId = null;
             showAuth();
         }
         
@@ -764,19 +522,15 @@ spa_html = '''
                 const data = await response.json();
                 
                 if (data.success) {
-                    allUsers = data.users;
-                    const usersList = document.getElementById('usersList');
-                    usersList.innerHTML = '';
+                    const userList = document.getElementById('userList');
+                    userList.innerHTML = '';
                     
                     data.users.forEach(user => {
                         const userElement = document.createElement('div');
-                        userElement.className = 'chat-item';
-                        userElement.innerHTML = `
-                            <span class="chat-item-icon">👤</span>
-                            <div>${user.username} (${user.phone})</div>
-                        `;
-                        userElement.onclick = () => selectChat('private', user.id, user.username);
-                        usersList.appendChild(userElement);
+                        userElement.className = 'user-item';
+                        userElement.innerHTML = `${user.username} (${user.phone})`;
+                        userElement.onclick = () => selectUser(user.id, user.username);
+                        userList.appendChild(userElement);
                     });
                 }
             } catch (error) {
@@ -784,62 +538,26 @@ spa_html = '''
             }
         }
         
-        async function loadGroups() {
-            try {
-                const response = await fetch('/api/groups');
-                const data = await response.json();
-                
-                if (data.success) {
-                    const groupsList = document.getElementById('groupsList');
-                    groupsList.innerHTML = '';
-                    
-                    data.groups.forEach(group => {
-                        const groupElement = document.createElement('div');
-                        groupElement.className = 'chat-item';
-                        groupElement.innerHTML = `
-                            <span class="chat-item-icon">👪</span>
-                            <div>
-                                <strong>${group.name}</strong>
-                                <div style="font-size: 0.9em; opacity: 0.7;">${group.description || 'Без описания'}</div>
-                            </div>
-                        `;
-                        groupElement.onclick = () => selectChat('group', group.id, group.name);
-                        groupsList.appendChild(groupElement);
-                    });
-                }
-            } catch (error) {
-                console.error('Failed to load groups:', error);
-            }
-        }
-        
-        async function selectChat(chatType, chatId, chatName) {
-            currentChat = chatId;
-            currentChatType = chatType;
+        async function selectUser(userId, username) {
+            selectedUserId = userId;
             
-            // Сбрасываем выделение
-            document.querySelectorAll('.chat-item').forEach(item => item.classList.remove('active'));
+            document.querySelectorAll('.user-item').forEach(item => item.classList.remove('active'));
             event.target.classList.add('active');
             
-            document.getElementById('chatTitle').textContent = `💬 Чат с ${chatName}`;
-            document.getElementById('messageInputArea').style.display = 'block';
-            
-            if (chatType === 'group') {
-                document.getElementById('chatInfo').innerHTML = `<button class="btn-small" onclick="showGroupInfo(${chatId})">ℹ️ Инфо</button>`;
-            } else {
-                document.getElementById('chatInfo').innerHTML = '';
-            }
+            document.getElementById('chatTitle').textContent = `💬 Чат с ${username}`;
+            document.getElementById('messageInput').style.display = 'flex';
             
             await loadMessages();
             
             if (refreshInterval) clearInterval(refreshInterval);
-            refreshInterval = setInterval(loadMessages, 2000);
+            refreshInterval = setInterval(loadMessages, 3000);
         }
         
         async function loadMessages() {
-            if (!currentChat) return;
+            if (!selectedUserId) return;
             
             try {
-                const response = await fetch(`/api/messages?type=${currentChatType}&id=${currentChat}`);
+                const response = await fetch(`/api/messages?user_id=${selectedUserId}`);
                 const data = await response.json();
                 
                 if (data.success) {
@@ -848,21 +566,14 @@ spa_html = '''
                     
                     data.messages.forEach(msg => {
                         const messageElement = document.createElement('div');
-                        messageElement.className = `message ${msg.is_own ? 'message-own' : 'message-other'} ${msg.type === 'group' ? 'message-group' : ''}`;
+                        messageElement.className = `message ${msg.is_own ? 'message-own' : 'message-other'}`;
                         
                         const time = new Date(msg.created_at).toLocaleTimeString();
-                        
-                        let messageContent = '';
-                        if (msg.type === 'group' && !msg.is_own) {
-                            messageContent += `<div class="message-sender">${msg.sender_name}</div>`;
-                        }
-                        
-                        messageContent += `
-                            <div>${msg.message_text}</div>
-                            <div class="message-time">${time}</div>
+                        messageElement.innerHTML = `
+                            <strong>${msg.sender_name}:</strong> ${msg.message_text}
+                            <div style="font-size: 0.8em; opacity: 0.7;">${time}</div>
                         `;
                         
-                        messageElement.innerHTML = messageContent;
                         messagesContainer.appendChild(messageElement);
                     });
                     
@@ -875,24 +586,13 @@ spa_html = '''
         
         async function sendMessage() {
             const messageText = document.getElementById('messageText').value.trim();
-            if (!messageText || !currentChat) return;
+            if (!messageText || !selectedUserId) return;
             
             try {
-                const payload = {
-                    message_text: messageText,
-                    type: currentChatType
-                };
-                
-                if (currentChatType === 'private') {
-                    payload.receiver_id = currentChat;
-                } else {
-                    payload.group_id = currentChat;
-                }
-                
                 const response = await fetch('/api/send_message', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(payload)
+                    body: JSON.stringify({ receiver_id: selectedUserId, message_text: messageText })
                 });
                 
                 const data = await response.json();
@@ -908,85 +608,11 @@ spa_html = '''
             }
         }
         
-        function showCreateGroupModal() {
-            const modal = document.getElementById('createGroupModal');
-            const membersList = document.getElementById('groupMembersList');
-            
-            membersList.innerHTML = '';
-            allUsers.forEach(user => {
-                const userElement = document.createElement('div');
-                userElement.className = 'user-select-item';
-                userElement.innerHTML = `
-                    <div class="checkbox-container">
-                        <input type="checkbox" id="user-${user.id}" value="${user.id}">
-                        <label for="user-${user.id}">${user.username} (${user.phone})</label>
-                    </div>
-                `;
-                membersList.appendChild(userElement);
-            });
-            
-            modal.style.display = 'block';
-        }
-        
-        function closeModal(modalId) {
-            document.getElementById(modalId).style.display = 'none';
-        }
-        
-        async function createGroup() {
-            const name = document.getElementById('groupName').value.trim();
-            const description = document.getElementById('groupDescription').value.trim();
-            
-            if (!name) {
-                showError('createGroupError', 'Введите название группы');
-                return;
-            }
-            
-            const memberCheckboxes = document.querySelectorAll('#groupMembersList input[type="checkbox"]:checked');
-            const memberIds = Array.from(memberCheckboxes).map(cb => parseInt(cb.value));
-            
-            try {
-                const response = await fetch('/api/create_group', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ name, description, member_ids: memberIds })
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    closeModal('createGroupModal');
-                    alert('Группа создана успешно!');
-                    loadGroups();
-                    
-                    // Очищаем форму
-                    document.getElementById('groupName').value = '';
-                    document.getElementById('groupDescription').value = '';
-                    document.querySelectorAll('#groupMembersList input[type="checkbox"]').forEach(cb => cb.checked = false);
-                } else {
-                    showError('createGroupError', data.error);
-                }
-            } catch (error) {
-                showError('createGroupError', 'Ошибка создания группы');
-            }
-        }
-        
-        function showGroupInfo(groupId) {
-            alert('Информация о группе будет здесь. ID группы: ' + groupId);
-            // В реальном приложении здесь можно показать детальную информацию о группе
-        }
-        
         function showError(elementId, message) {
             const element = document.getElementById(elementId);
             element.textContent = message;
             element.style.display = 'block';
             setTimeout(() => element.style.display = 'none', 5000);
-        }
-        
-        // Закрытие модального окна при клике вне его
-        window.onclick = function(event) {
-            if (event.target.classList.contains('modal')) {
-                event.target.style.display = 'none';
-            }
         }
         
         checkAuth();
@@ -1007,5 +633,4 @@ if __name__ == '__main__':
     print("🚀 Web Messenger запущен!")
     print("✅ База данных инициализирована")
     print("🔑 Тестовые пользователи: alex/password123, maria/password123, ivan/password123")
-    print("👪 Тестовая группа: 'Общая группа' с участием всех пользователей")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=False) добавь нормальную панель для писания сообщений и добавь функцию создания групп

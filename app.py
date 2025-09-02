@@ -3,10 +3,17 @@ import sqlite3
 import hashlib
 from datetime import datetime
 import os
+import requests
+import json
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-12345')
 app.config['DATABASE'] = 'messenger.db'
+
+# Настройки ИИ-бота (можно использовать OpenAI API или другой сервис)
+AI_BOT_ENABLED = True
+AI_BOT_NAME = "Ассистент"
+AI_BOT_ID = 0  # Специальный ID для бота
 
 def get_db():
     """Подключение к базе данных"""
@@ -75,6 +82,49 @@ def init_db():
 def hash_password(password):
     """Хеширование пароля"""
     return hashlib.sha256(password.encode()).hexdigest()
+
+def ai_bot_response(message):
+    """Функция для генерации ответа ИИ-бота"""
+    try:
+        # Простая реализация без внешнего API
+        message_lower = message.lower()
+        
+        if any(word in message_lower for word in ['привет', 'здравствуй', 'hello', 'hi']):
+            return "Привет! Я ваш виртуальный помощник. Чем могу помочь?"
+        
+        elif any(word in message_lower for word in ['как дела', 'как ты']):
+            return "У меня всё отлично! Готов помочь вам с любыми вопросами."
+        
+        elif any(word in message_lower for word in ['помощь', 'help']):
+            return "Я могу ответить на ваши вопросы, поддержать беседу или просто поболтать. Попробуйте спросить о погоде, времени или просто рассказать что-нибудь!"
+        
+        elif any(word in message_lower for word in ['погода', 'weather']):
+            return "К сожалению, я не имею доступа к данным о погоде в реальном времени. Но могу предположить, что сегодня отличный день для общения!"
+        
+        elif any(word in message_lower for word in ['время', 'time']):
+            current_time = datetime.now().strftime("%H:%:%S")
+            return f"Сейчас {current_time}. Не теряйте время зря - общайтесь с друзьями!"
+        
+        elif any(word in message_lower for word in ['спасибо', 'благодарю']):
+            return "Всегда пожалуйста! Рад быть полезным."
+        
+        elif any(word in message_lower for word in ['пока', 'до свидания']):
+            return "До свидания! Жду нашего следующего общения."
+        
+        else:
+            # Стандартный ответ для неизвестных запросов
+            responses = [
+                "Интересно! Расскажите подробнее.",
+                "Понятно. Что вы думаете об этом?",
+                "Я еще учусь понимать людей. Можете перефразировать?",
+                "Не уверен, что правильно понял. Можете объяснить иначе?",
+                "Записываю эту информацию. Что еще хотели бы обсудить?"
+            ]
+            import random
+            return random.choice(responses)
+            
+    except Exception as e:
+        return "Извините, произошла ошибка при обработке вашего сообщения."
 
 @app.route('/')
 def index():
@@ -189,6 +239,15 @@ def api_users():
         db.close()
         
         users_data = [dict(user) for user in users]
+        
+        # Добавляем ИИ-бота в список пользователей, если включен
+        if AI_BOT_ENABLED:
+            users_data.insert(0, {
+                'id': AI_BOT_ID,
+                'username': AI_BOT_NAME,
+                'phone': 'Искусственный интеллект'
+            })
+        
         return jsonify({'success': True, 'users': users_data})
         
     except sqlite3.OperationalError as e:
@@ -210,6 +269,10 @@ def api_messages():
         
         db = get_db()
         cursor = db.cursor()
+        
+        # Для чата с ботом возвращаем пустой список (сообщения не сохраняются в БД)
+        if int(other_user_id) == AI_BOT_ID:
+            return jsonify({'success': True, 'messages': []})
         
         cursor.execute('''
             SELECT m.id, m.sender_id, m.receiver_id, m.message_text, m.created_at, 
@@ -255,6 +318,16 @@ def api_send_message():
         
         if not receiver_id or not message_text:
             return jsonify({'success': False, 'error': 'Заполните все поля'}), 400
+        
+        # Обработка сообщений для ИИ-бота
+        if int(receiver_id) == AI_BOT_ID:
+            # Генерируем ответ от бота
+            bot_response = ai_bot_response(message_text)
+            return jsonify({
+                'success': True, 
+                'message': 'Сообщение отправлено',
+                'bot_response': bot_response
+            })
         
         db = get_db()
         cursor = db.cursor()
@@ -310,7 +383,7 @@ def api_health():
 if not os.path.exists('templates'):
     os.makedirs('templates')
 
-# HTML шаблон для SPA
+# HTML шаблон для SPA с адаптивным дизайном и ИИ-ботом
 spa_html = '''
 <!DOCTYPE html>
 <html lang="ru">
@@ -320,41 +393,360 @@ spa_html = '''
     <title>💬 Web Messenger</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
-        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        :root {
+            --primary-color: #667eea;
+            --secondary-color: #764ba2;
+            --light-bg: #f8f9fa;
+            --dark-text: #333;
+            --light-text: #fff;
+            --border-color: #ddd;
+            --error-color: #e74c3c;
+            --success-color: #27ae60;
+        }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif; 
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%); 
+            min-height: 100vh;
+            color: var(--dark-text);
+        }
+        .container { 
+            max-width: 1200px; 
+            margin: 0 auto; 
+            padding: 20px; 
+            height: 100vh;
+        }
         
-        .auth-container { display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-        .auth-box { background: white; padding: 40px; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); width: 100%; max-width: 400px; }
-        .auth-tabs { display: flex; margin-bottom: 20px; border-bottom: 2px solid #eee; }
-        .auth-tab { flex: 1; padding: 15px; text-align: center; cursor: pointer; border-bottom: 3px solid transparent; }
-        .auth-tab.active { border-bottom-color: #667eea; color: #667eea; font-weight: bold; }
-        .auth-form { display: none; }
-        .auth-form.active { display: block; }
-        input { width: 100%; padding: 12px; margin: 10px 0; border: 2px solid #ddd; border-radius: 8px; font-size: 16px; }
-        input:focus { outline: none; border-color: #667eea; }
-        button { width: 100%; padding: 12px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; margin: 10px 0; }
-        button:hover { opacity: 0.9; }
-        .error { color: #e74c3c; text-align: center; margin: 10px 0; padding: 10px; background: #f8d7da; border-radius: 5px; }
-        .success { color: #27ae60; text-align: center; margin: 10px 0; padding: 10px; background: #d4edda; border-radius: 5px; }
+        /* Аутентификация */
+        .auth-container { 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            min-height: 100vh; 
+            padding: 20px;
+        }
+        .auth-box { 
+            background: white; 
+            padding: 30px; 
+            border-radius: 15px; 
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2); 
+            width: 100%; 
+            max-width: 400px; 
+        }
+        .auth-tabs { 
+            display: flex; 
+            margin-bottom: 20px; 
+            border-bottom: 2px solid var(--border-color); 
+        }
+        .auth-tab { 
+            flex: 1; 
+            padding: 15px; 
+            text-align: center; 
+            cursor: pointer; 
+            border-bottom: 3px solid transparent; 
+            transition: all 0.3s;
+        }
+        .auth-tab.active { 
+            border-bottom-color: var(--primary-color); 
+            color: var(--primary-color); 
+            font-weight: bold; 
+        }
+        .auth-form { 
+            display: none; 
+        }
+        .auth-form.active { 
+            display: block; 
+        }
+        input { 
+            width: 100%; 
+            padding: 12px; 
+            margin: 10px 0; 
+            border: 2px solid var(--border-color); 
+            border-radius: 8px; 
+            font-size: 16px; 
+            transition: border-color 0.3s;
+        }
+        input:focus { 
+            outline: none; 
+            border-color: var(--primary-color); 
+        }
+        button { 
+            width: 100%; 
+            padding: 12px; 
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%); 
+            color: white; 
+            border: none; 
+            border-radius: 8px; 
+            font-size: 16px; 
+            cursor: pointer; 
+            margin: 10px 0; 
+            transition: opacity 0.3s;
+        }
+        button:hover { 
+            opacity: 0.9; 
+        }
+        .error { 
+            color: var(--error-color); 
+            text-align: center; 
+            margin: 10px 0; 
+            padding: 10px; 
+            background: #f8d7da; 
+            border-radius: 5px; 
+            display: none;
+        }
+        .success { 
+            color: var(--success-color); 
+            text-align: center; 
+            margin: 10px 0; 
+            padding: 10px; 
+            background: #d4edda; 
+            border-radius: 5px; 
+            display: none;
+        }
         
-        .chat-container { display: none; background: white; border-radius: 15px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.2); height: 80vh; }
-        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; }
-        .chat-layout { display: flex; height: calc(100% - 60px); }
-        .sidebar { width: 250px; background: #f8f9fa; border-right: 1px solid #ddd; overflow-y: auto; }
-        .sidebar-header { padding: 15px; border-bottom: 1px solid #ddd; }
-        .user-list { padding: 10px; }
-        .user-item { padding: 10px; margin: 5px 0; background: white; border-radius: 5px; cursor: pointer; transition: all 0.3s; }
-        .user-item:hover { background: #667eea; color: white; }
-        .user-item.active { background: #667eea; color: white; }
-        .chat-main { flex: 1; display: flex; flex-direction: column; }
-        .chat-header { padding: 15px; background: white; border-bottom: 1px solid #ddd; }
-        .messages-container { flex: 1; padding: 20px; overflow-y: auto; background: #f8f9fa; }
-        .message { max-width: 70%; margin: 10px 0; padding: 12px; border-radius: 15px; }
-        .message-own { background: #667eea; color: white; margin-left: auto; border-bottom-right-radius: 5px; }
-        .message-other { background: white; color: #333; margin-right: auto; border-bottom-left-radius: 5px; border: 1px solid #ddd; }
-        .message-input { display: flex; padding: 15px; background: white; border-top: 1px solid #ddd; }
-        .message-input input { flex: 1; margin-right: 10px; }
-        .logout-btn { background: #e74c3c; padding: 8px 15px; border-radius: 5px; }
+        /* Чат */
+        .chat-container { 
+            display: none; 
+            background: white; 
+            border-radius: 15px; 
+            overflow: hidden; 
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2); 
+            height: calc(100vh - 40px);
+            flex-direction: column;
+        }
+        .header { 
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%); 
+            color: white; 
+            padding: 15px 20px; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            flex-shrink: 0;
+        }
+        .chat-layout { 
+            display: flex; 
+            height: 100%; 
+            overflow: hidden;
+        }
+        .sidebar { 
+            width: 250px; 
+            background: var(--light-bg); 
+            border-right: 1px solid var(--border-color); 
+            overflow-y: auto; 
+            display: flex;
+            flex-direction: column;
+        }
+        .sidebar-header { 
+            padding: 15px; 
+            border-bottom: 1px solid var(--border-color); 
+            background: white;
+        }
+        .user-list { 
+            padding: 10px; 
+            overflow-y: auto;
+            flex-grow: 1;
+        }
+        .user-item { 
+            padding: 12px; 
+            margin: 5px 0; 
+            background: white; 
+            border-radius: 8px; 
+            cursor: pointer; 
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+        }
+        .user-item:hover { 
+            background: var(--primary-color); 
+            color: white; 
+        }
+        .user-item.active { 
+            background: var(--primary-color); 
+            color: white; 
+        }
+        .user-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 10px;
+            color: white;
+            font-weight: bold;
+        }
+        .ai-bot {
+            background: linear-gradient(135deg, #4CAF50 0%, #2E7D32 100%);
+        }
+        .user-info {
+            flex-grow: 1;
+        }
+        .user-name {
+            font-weight: bold;
+        }
+        .user-phone {
+            font-size: 0.8em;
+            opacity: 0.7;
+        }
+        .chat-main { 
+            flex: 1; 
+            display: flex; 
+            flex-direction: column; 
+            height: 100%;
+        }
+        .chat-header { 
+            padding: 15px; 
+            background: white; 
+            border-bottom: 1px solid var(--border-color); 
+            flex-shrink: 0;
+        }
+        .messages-container { 
+            flex: 1; 
+            padding: 20px; 
+            overflow-y: auto; 
+            background: var(--light-bg);
+            display: flex;
+            flex-direction: column;
+        }
+        .message { 
+            max-width: 70%; 
+            margin: 10px 0; 
+            padding: 12px 16px; 
+            border-radius: 18px; 
+            position: relative;
+            animation: fadeIn 0.3s;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .message-own { 
+            background: var(--primary-color); 
+            color: white; 
+            margin-left: auto; 
+            border-bottom-right-radius: 5px; 
+        }
+        .message-other { 
+            background: white; 
+            color: var(--dark-text); 
+            margin-right: auto; 
+            border-bottom-left-radius: 5px; 
+            border: 1px solid var(--border-color); 
+        }
+        .message-bot {
+            background: #4CAF50;
+            color: white;
+        }
+        .message-sender {
+            font-weight: bold;
+            margin-bottom: 5px;
+            font-size: 0.9em;
+        }
+        .message-time {
+            font-size: 0.7em;
+            opacity: 0.7;
+            text-align: right;
+            margin-top: 5px;
+        }
+        .message-input { 
+            display: none; 
+            padding: 15px; 
+            background: white; 
+            border-top: 1px solid var(--border-color); 
+            flex-shrink: 0;
+        }
+        .message-input input { 
+            flex: 1; 
+            margin-right: 10px; 
+        }
+        .logout-btn { 
+            background: var(--error-color); 
+            padding: 8px 15px; 
+            border-radius: 5px; 
+            border: none;
+            color: white;
+            cursor: pointer;
+        }
+        
+        /* Мобильная адаптация */
+        @media (max-width: 768px) {
+            .container {
+                padding: 10px;
+            }
+            .auth-box {
+                padding: 20px;
+            }
+            .chat-container {
+                height: calc(100vh - 20px);
+                border-radius: 10px;
+            }
+            .chat-layout {
+                flex-direction: column;
+            }
+            .sidebar {
+                width: 100%;
+                height: 30%;
+                border-right: none;
+                border-bottom: 1px solid var(--border-color);
+            }
+            .user-list {
+                padding: 5px;
+            }
+            .user-item {
+                padding: 8px;
+            }
+            .header h2 {
+                font-size: 1.2em;
+            }
+            .message {
+                max-width: 85%;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .auth-tab {
+                padding: 10px;
+                font-size: 0.9em;
+            }
+            input, button {
+                padding: 10px;
+                font-size: 14px;
+            }
+            .user-avatar {
+                width: 35px;
+                height: 35px;
+                font-size: 0.9em;
+            }
+            .user-name {
+                font-size: 0.9em;
+            }
+            .user-phone {
+                font-size: 0.7em;
+            }
+            .message {
+                max-width: 90%;
+                padding: 10px 12px;
+            }
+        }
+        
+        /* Индикатор загрузки */
+        .loader {
+            display: none;
+            text-align: center;
+            padding: 10px;
+            color: var(--primary-color);
+        }
+        .typing-indicator {
+            display: none;
+            background: white;
+            padding: 10px 15px;
+            border-radius: 18px;
+            margin: 5px 0;
+            align-self: flex-start;
+            border: 1px solid var(--border-color);
+            font-style: italic;
+            color: #666;
+        }
     </style>
 </head>
 <body>
@@ -368,7 +760,7 @@ spa_html = '''
                 
                 <div class="auth-form active" id="loginForm">
                     <h2>🔐 Вход</h2>
-                    <div id="loginError" class="error" style="display: none;"></div>
+                    <div id="loginError" class="error"></div>
                     <input type="text" id="loginUsername" placeholder="Логин" value="alex">
                     <input type="password" id="loginPassword" placeholder="Пароль" value="password123">
                     <button onclick="login()">Войти</button>
@@ -376,7 +768,7 @@ spa_html = '''
                 
                 <div class="auth-form" id="registerForm">
                     <h2>📝 Регистрация</h2>
-                    <div id="registerError" class="error" style="display: none;"></div>
+                    <div id="registerError" class="error"></div>
                     <input type="text" id="regUsername" placeholder="Логин">
                     <input type="text" id="regPhone" placeholder="Телефон">
                     <input type="password" id="regPassword" placeholder="Пароль">
@@ -397,7 +789,9 @@ spa_html = '''
                     <div class="sidebar-header">
                         <h3>👥 Пользователи</h3>
                     </div>
-                    <div class="user-list" id="userList"></div>
+                    <div class="user-list" id="userList">
+                        <div class="loader" id="usersLoader">Загрузка...</div>
+                    </div>
                 </div>
                 
                 <div class="chat-main">
@@ -405,11 +799,15 @@ spa_html = '''
                         <h3 id="chatTitle">Выберите пользователя для чата</h3>
                     </div>
                     
-                    <div class="messages-container" id="messagesContainer"></div>
+                    <div class="messages-container" id="messagesContainer">
+                        <div class="loader" id="messagesLoader">Загрузка сообщений...</div>
+                    </div>
                     
-                    <div class="message-input" id="messageInput" style="display: none;">
+                    <div class="typing-indicator" id="typingIndicator">Ассистент печатает...</div>
+                    
+                    <div class="message-input" id="messageInput">
                         <input type="text" id="messageText" placeholder="Введите сообщение..." onkeypress="if(event.key === 'Enter') sendMessage()">
-                        <button onclick="sendMessage()">📤 Отправить</button>
+                        <button onclick="sendMessage()">📤</button>
                     </div>
                 </div>
             </div>
@@ -419,7 +817,14 @@ spa_html = '''
     <script>
         let currentUser = null;
         let selectedUserId = null;
+        let selectedUserName = null;
         let refreshInterval = null;
+        let isMobile = window.innerWidth <= 768;
+        
+        // Определяем мобильное устройство
+        window.addEventListener('resize', () => {
+            isMobile = window.innerWidth <= 768;
+        });
         
         async function checkAuth() {
             try {
@@ -462,6 +867,11 @@ spa_html = '''
             const username = document.getElementById('loginUsername').value;
             const password = document.getElementById('loginPassword').value;
             
+            if (!username || !password) {
+                showError('loginError', 'Заполните все поля');
+                return;
+            }
+            
             try {
                 const response = await fetch('/api/login', {
                     method: 'POST',
@@ -488,6 +898,16 @@ spa_html = '''
             const phone = document.getElementById('regPhone').value;
             const password = document.getElementById('regPassword').value;
             const confirm = document.getElementById('regConfirm').value;
+            
+            if (!username || !phone || !password || !confirm) {
+                showError('registerError', 'Заполните все поля');
+                return;
+            }
+            
+            if (password !== confirm) {
+                showError('registerError', 'Пароли не совпадают');
+                return;
+            }
             
             try {
                 const response = await fetch('/api/register', {
@@ -517,6 +937,8 @@ spa_html = '''
         }
         
         async function loadUsers() {
+            showLoader('usersLoader', true);
+            
             try {
                 const response = await fetch('/api/users');
                 const data = await response.json();
@@ -528,33 +950,57 @@ spa_html = '''
                     data.users.forEach(user => {
                         const userElement = document.createElement('div');
                         userElement.className = 'user-item';
-                        userElement.innerHTML = `${user.username} (${user.phone})`;
+                        if (user.id === 0) {
+                            userElement.classList.add('ai-bot');
+                        }
+                        
+                        const firstLetter = user.username.charAt(0).toUpperCase();
+                        userElement.innerHTML = `
+                            <div class="user-avatar">${firstLetter}</div>
+                            <div class="user-info">
+                                <div class="user-name">${user.username}</div>
+                                <div class="user-phone">${user.phone}</div>
+                            </div>
+                        `;
+                        
                         userElement.onclick = () => selectUser(user.id, user.username);
                         userList.appendChild(userElement);
                     });
                 }
             } catch (error) {
                 console.error('Failed to load users:', error);
+            } finally {
+                showLoader('usersLoader', false);
             }
         }
         
         async function selectUser(userId, username) {
-            selectedUserId = userId;
-            
+            // Сброс предыдущего выбора
             document.querySelectorAll('.user-item').forEach(item => item.classList.remove('active'));
-            event.target.classList.add('active');
+            event.currentTarget.classList.add('active');
+            
+            selectedUserId = userId;
+            selectedUserName = username;
             
             document.getElementById('chatTitle').textContent = `💬 Чат с ${username}`;
             document.getElementById('messageInput').style.display = 'flex';
             
             await loadMessages();
             
+            // На мобильных устройствах скрываем sidebar после выбора пользователя
+            if (isMobile) {
+                document.querySelector('.sidebar').style.display = 'none';
+                document.querySelector('.chat-main').style.width = '100%';
+            }
+            
             if (refreshInterval) clearInterval(refreshInterval);
-            refreshInterval = setInterval(loadMessages, 3000);
+            refreshInterval = setInterval(loadMessages, 2000);
         }
         
         async function loadMessages() {
             if (!selectedUserId) return;
+            
+            showLoader('messagesLoader', true);
             
             try {
                 const response = await fetch(`/api/messages?user_id=${selectedUserId}`);
@@ -564,29 +1010,60 @@ spa_html = '''
                     const messagesContainer = document.getElementById('messagesContainer');
                     messagesContainer.innerHTML = '';
                     
-                    data.messages.forEach(msg => {
-                        const messageElement = document.createElement('div');
-                        messageElement.className = `message ${msg.is_own ? 'message-own' : 'message-other'}`;
-                        
-                        const time = new Date(msg.created_at).toLocaleTimeString();
-                        messageElement.innerHTML = `
-                            <strong>${msg.sender_name}:</strong> ${msg.message_text}
-                            <div style="font-size: 0.8em; opacity: 0.7;">${time}</div>
+                    if (data.messages.length === 0 && selectedUserId == 0) {
+                        const welcomeMsg = document.createElement('div');
+                        welcomeMsg.className = 'message message-bot';
+                        welcomeMsg.innerHTML = `
+                            <div class="message-sender">Ассистент</div>
+                            <div>Привет! Я ваш виртуальный помощник. Задайте мне любой вопрос!</div>
+                            <div class="message-time">${new Date().toLocaleTimeString()}</div>
                         `;
-                        
-                        messagesContainer.appendChild(messageElement);
-                    });
+                        messagesContainer.appendChild(welcomeMsg);
+                    } else {
+                        data.messages.forEach(msg => {
+                            const messageElement = document.createElement('div');
+                            messageElement.className = `message ${msg.is_own ? 'message-own' : 'message-other'}`;
+                            
+                            const time = new Date(msg.created_at).toLocaleTimeString();
+                            messageElement.innerHTML = `
+                                ${!msg.is_own ? `<div class="message-sender">${msg.sender_name}</div>` : ''}
+                                <div>${msg.message_text}</div>
+                                <div class="message-time">${time}</div>
+                            `;
+                            
+                            messagesContainer.appendChild(messageElement);
+                        });
+                    }
                     
                     messagesContainer.scrollTop = messagesContainer.scrollHeight;
                 }
             } catch (error) {
                 console.error('Failed to load messages:', error);
+            } finally {
+                showLoader('messagesLoader', false);
             }
         }
         
         async function sendMessage() {
             const messageText = document.getElementById('messageText').value.trim();
             if (!messageText || !selectedUserId) return;
+            
+            // Добавляем сообщение сразу в интерфейс для мгновенного отображения
+            const messagesContainer = document.getElementById('messagesContainer');
+            const messageElement = document.createElement('div');
+            messageElement.className = 'message message-own';
+            
+            const time = new Date().toLocaleTimeString();
+            messageElement.innerHTML = `
+                <div>${messageText}</div>
+                <div class="message-time">${time}</div>
+            `;
+            
+            messagesContainer.appendChild(messageElement);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            
+            // Очищаем поле ввода
+            document.getElementById('messageText').value = '';
             
             try {
                 const response = await fetch('/api/send_message', {
@@ -598,8 +1075,33 @@ spa_html = '''
                 const data = await response.json();
                 
                 if (data.success) {
-                    document.getElementById('messageText').value = '';
-                    loadMessages();
+                    // Если это сообщение боту и есть ответ
+                    if (data.bot_response) {
+                        // Показываем индикатор набора сообщения
+                        document.getElementById('typingIndicator').style.display = 'block';
+                        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                        
+                        // Имитируем задержку ответа бота
+                        setTimeout(() => {
+                            document.getElementById('typingIndicator').style.display = 'none';
+                            
+                            const botMessageElement = document.createElement('div');
+                            botMessageElement.className = 'message message-bot';
+                            
+                            const time = new Date().toLocaleTimeString();
+                            botMessageElement.innerHTML = `
+                                <div class="message-sender">Ассистент</div>
+                                <div>${data.bot_response}</div>
+                                <div class="message-time">${time}</div>
+                            `;
+                            
+                            messagesContainer.appendChild(botMessageElement);
+                            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                        }, 1500);
+                    } else {
+                        // Для обычных пользователей просто обновляем сообщения
+                        loadMessages();
+                    }
                 } else {
                     alert('Ошибка: ' + data.error);
                 }
@@ -615,7 +1117,45 @@ spa_html = '''
             setTimeout(() => element.style.display = 'none', 5000);
         }
         
-        checkAuth();
+        function showLoader(loaderId, show) {
+            const loader = document.getElementById(loaderId);
+            loader.style.display = show ? 'block' : 'none';
+        }
+        
+        // Функция для показа/скрытия sidebar на мобильных устройствах
+        function toggleSidebar() {
+            const sidebar = document.querySelector('.sidebar');
+            if (sidebar.style.display === 'none') {
+                sidebar.style.display = 'block';
+                document.querySelector('.chat-main').style.width = '0';
+            } else {
+                sidebar.style.display = 'none';
+                document.querySelector('.chat-main').style.width = '100%';
+            }
+        }
+        
+        // Добавляем кнопку для мобильной навигации
+        function addMobileNav() {
+            if (isMobile) {
+                const header = document.querySelector('.header');
+                const backButton = document.createElement('button');
+                backButton.className = 'logout-btn';
+                backButton.innerHTML = '← Назад';
+                backButton.onclick = toggleSidebar;
+                backButton.style.marginRight = '10px';
+                header.insertBefore(backButton, header.childNodes[0]);
+                
+                // Изначально скрываем sidebar на мобильных
+                document.querySelector('.sidebar').style.display = 'none';
+                document.querySelector('.chat-main').style.width = '100%';
+            }
+        }
+        
+        // Инициализация при загрузке
+        window.onload = function() {
+            checkAuth();
+            addMobileNav();
+        };
     </script>
 </body>
 </html>
@@ -633,4 +1173,5 @@ if __name__ == '__main__':
     print("🚀 Web Messenger запущен!")
     print("✅ База данных инициализирована")
     print("🔑 Тестовые пользователи: alex/password123, maria/password123, ivan/password123")
+    print("🤖 ИИ-бот активирован")
     app.run(host='0.0.0.0', port=port, debug=False)

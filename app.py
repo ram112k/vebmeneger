@@ -1,3 +1,4 @@
+
 from flask import Flask, render_template, request, jsonify, session
 import sqlite3
 import hashlib
@@ -102,7 +103,7 @@ def ai_bot_response(message):
             return "К сожалению, я не имею доступа к данным о погоде в реальном времени. Но могу предположить, что сегодня отличный день для общения!"
         
         elif any(word in message_lower for word in ['время', 'time']):
-            current_time = datetime.now().strftime("%H:%:%S")
+            current_time = datetime.now().strftime("%H:%M:%S")
             return f"Сейчас {current_time}. Не теряйте время зря - общайтесь с друзьями!"
         
         elif any(word in message_lower for word in ['спасибо', 'благодарю']):
@@ -649,7 +650,7 @@ spa_html = '''
             margin-top: 5px;
         }
         .message-input { 
-            display: none; 
+            display: flex; 
             padding: 15px; 
             background: white; 
             border-top: 1px solid var(--border-color); 
@@ -746,6 +747,11 @@ spa_html = '''
             border: 1px solid var(--border-color);
             font-style: italic;
             color: #666;
+        }
+        
+        /* Изначально скрываем поле ввода */
+        #messageInput {
+            display: none !important;
         }
     </style>
 </head>
@@ -1146,7 +1152,7 @@ spa_html = '''
                 header.insertBefore(backButton, header.childNodes[0]);
                 
                 // Изначально скрываем sidebar на мобильных
-                document.querySelector('.sidebar').style.display = 'none';
+                document.querySelector('.sidebar').style.display = 'block';
                 document.querySelector('.chat-main').style.width = '100%';
             }
         }
